@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi.responses import StreamingResponse
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
 from datetime import datetime, timedelta
 import os
-import shutil
+import io
 from typing import List, Optional
 from bson import ObjectId
 import json
@@ -47,9 +47,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create uploads directory if it doesn't exist
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# GridFS will be initialized in startup event
 
 # Database startup and shutdown events
 @app.on_event("startup")
@@ -564,26 +562,79 @@ async def update_contact_info(contact_update: ContactInfoUpdate):
     
     return serialize_doc(updated_contact)
 
-# File upload endpoints
+# GridFS File Storage endpoints
+@app.get("/api/images/{file_id}")
+async def get_image(file_id: str):
+    """Serve images from MongoDB GridFS"""
+    try:
+        db = await get_database()
+        fs = AsyncIOMotorGridFSBucket(db)
+        
+        # Get file from GridFS
+        file_data = await fs.open_download_stream(ObjectId(file_id))
+        
+        # Get file info
+        file_info = await fs.find({"_id": ObjectId(file_id)}).to_list(1)
+        if not file_info:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        content_type = file_info[0].metadata.get("content_type", "image/jpeg")
+        
+        # Stream the file
+        async def generate_stream():
+            async for chunk in file_data:
+                yield chunk
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type=content_type,
+            headers={"Content-Disposition": f"inline; filename={file_info[0].filename}"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="Image not found")
+
 @app.post("/api/admin/upload", dependencies=[Depends(get_current_admin)])
 async def upload_file(file: UploadFile = File(...)):
+    """Upload file to MongoDB GridFS"""
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail="Only image files are allowed")
     
-    # Create unique filename
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{timestamp}_{file.filename}"
-    file_path = f"uploads/{filename}"
-    
-    # Save file
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    return {"filename": filename, "url": f"/uploads/{filename}"}
+    try:
+        db = await get_database()
+        fs = AsyncIOMotorGridFSBucket(db)
+        
+        # Create unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}_{file.filename}"
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Store in GridFS
+        file_id = await fs.upload_from_stream(
+            filename,
+            io.BytesIO(file_content),
+            metadata={
+                "content_type": file.content_type,
+                "upload_date": datetime.utcnow(),
+                "original_filename": file.filename
+            }
+        )
+        
+        return {
+            "file_id": str(file_id),
+            "filename": filename,
+            "url": f"/api/images/{file_id}"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
 
 @app.post("/api/admin/categories/{category_id}/image", dependencies=[Depends(get_current_admin)])
 async def upload_category_image(category_id: str, file: UploadFile = File(...)):
-    # Upload file first
+    """Upload category image to GridFS"""
+    # Upload file to GridFS
     upload_result = await upload_file(file)
     
     # Update category with image URL
@@ -599,7 +650,8 @@ async def upload_category_image(category_id: str, file: UploadFile = File(...)):
 
 @app.post("/api/admin/products/{product_id}/image", dependencies=[Depends(get_current_admin)])
 async def upload_product_image(product_id: str, file: UploadFile = File(...)):
-    # Upload file first
+    """Upload product image to GridFS"""
+    # Upload file to GridFS
     upload_result = await upload_file(file)
     
     # Update product with image URL
@@ -615,7 +667,8 @@ async def upload_product_image(product_id: str, file: UploadFile = File(...)):
 
 @app.post("/api/admin/content/{page}/logo", dependencies=[Depends(get_current_admin)])
 async def upload_logo(page: str, file: UploadFile = File(...)):
-    # Upload file first
+    """Upload content logo to GridFS"""
+    # Upload file to GridFS
     upload_result = await upload_file(file)
     
     # Update content with logo URL
