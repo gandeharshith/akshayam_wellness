@@ -1,1 +1,0 @@
-# akshayam_wellness
