@@ -573,12 +573,9 @@ async def get_image(file_id: str):
         # Get file from GridFS
         file_data = await fs.open_download_stream(ObjectId(file_id))
         
-        # Get file info
-        file_info = await fs.find({"_id": ObjectId(file_id)}).to_list(1)
-        if not file_info:
-            raise HTTPException(status_code=404, detail="Image not found")
-        
-        content_type = file_info[0].metadata.get("content_type", "image/jpeg")
+        # Get file info - using grid_out properties directly
+        content_type = file_data.metadata.get("content_type", "image/jpeg") if file_data.metadata else "image/jpeg"
+        filename = file_data.filename or "image"
         
         # Stream the file
         async def generate_stream():
@@ -588,7 +585,7 @@ async def get_image(file_id: str):
         return StreamingResponse(
             generate_stream(),
             media_type=content_type,
-            headers={"Content-Disposition": f"inline; filename={file_info[0].filename}"}
+            headers={"Content-Disposition": f"inline; filename={filename}"}
         )
         
     except Exception as e:
