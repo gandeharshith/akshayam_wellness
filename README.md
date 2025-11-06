@@ -20,37 +20,28 @@ FastAPI backend for the Akshayam Wellness e-commerce platform specializing in or
 - **File Handling**: Multipart file uploads
 - **CORS**: Enabled for frontend integration
 
-## Installation
+## Quick Start
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd akshayam-wellness-backend
-   ```
-
-2. **Create virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
+1. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Environment Setup**
-   Create a `.env` file in the root directory:
+2. **Set up environment** (optional)
+   Create a `.env` file with your MongoDB URI:
    ```
    MONGODB_URI=your_mongodb_connection_string
    ```
+   *(If not provided, it will use default local MongoDB)*
 
-5. **Run the server**
+3. **Run the server**
    ```bash
    python main.py
    ```
 
 The server will start on `http://localhost:8000`
+
+**That's it!** The backend is now running and ready to use.
 
 ## API Endpoints
 
