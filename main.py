@@ -682,6 +682,11 @@ async def upload_logo(page: str, file: UploadFile = File(...)):
     
     return upload_result
 
+# Root endpoint
+@app.get("/")
+async def root():
+    return {"message": "servicesuccessful"}
+
 # Health check
 @app.get("/health")
 async def health_check():
