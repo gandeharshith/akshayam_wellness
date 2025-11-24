@@ -21,18 +21,23 @@ from database import (
     ADMINS_COLLECTION,
     USERS_COLLECTION
 )
+
+# Define recipes collection constant
+RECIPES_COLLECTION = "recipes"
 from models import (
     Category, CategoryCreate, CategoryUpdate,
     Product, ProductCreate, ProductUpdate,
     Order, OrderCreate, OrderStatusUpdate, OrderItem,
     Content, ContentCreate, ContentUpdate,
     ContactInfo, ContactInfoUpdate,
+    Recipe, RecipeCreate, RecipeUpdate,
     Admin, AdminLogin,
-    User, UserCreate, UserLogin
+    User, UserCreate, UserLogin,
+    StockValidationRequest, StockValidationResponse, StockValidationItem
 )
 from auth import (
     get_password_hash, verify_password, create_access_token,
-    get_current_admin, ACCESS_TOKEN_EXPIRE_MINUTES
+    get_current_admin, ACCESS_TOKEN_EXPIRE_MINUTES, ADMIN_TOKEN_EXPIRE_HOURS
 )
 
 # Create FastAPI app
@@ -114,7 +119,8 @@ async def admin_login(admin_data: AdminLogin):
     if not admin or not verify_password(admin_data.password, admin["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # Use 10 hours expiry for admin tokens
+    access_token_expires = timedelta(hours=ADMIN_TOKEN_EXPIRE_HOURS)
     access_token = create_access_token(
         data={"sub": admin["username"]}, expires_delta=access_token_expires
     )
@@ -255,6 +261,64 @@ async def delete_product(product_id: str):
     
     return {"message": "Product deleted successfully"}
 
+# Stock validation endpoint
+@app.post("/api/validate-stock")
+async def validate_stock(stock_request: StockValidationRequest):
+    """Validate stock availability for cart items before checkout"""
+    db = await get_database()
+    products_collection = db[PRODUCTS_COLLECTION]
+    
+    invalid_items = []
+    
+    for item in stock_request.items:
+        try:
+            product = await products_collection.find_one({"_id": ObjectId(item.product_id)})
+            if not product:
+                invalid_items.append({
+                    "product_id": item.product_id,
+                    "requested_quantity": item.quantity,
+                    "available_quantity": 0,
+                    "error": "Product not found"
+                })
+                continue
+                
+            if product["quantity"] <= 0:
+                invalid_items.append({
+                    "product_id": item.product_id,
+                    "product_name": product["name"],
+                    "requested_quantity": item.quantity,
+                    "available_quantity": product["quantity"],
+                    "error": f"{product['name']} is out of stock"
+                })
+            elif product["quantity"] < item.quantity:
+                invalid_items.append({
+                    "product_id": item.product_id,
+                    "product_name": product["name"],
+                    "requested_quantity": item.quantity,
+                    "available_quantity": product["quantity"],
+                    "error": f"{product['name']} has only {product['quantity']} items available, but you requested {item.quantity}"
+                })
+        except Exception as e:
+            invalid_items.append({
+                "product_id": item.product_id,
+                "requested_quantity": item.quantity,
+                "available_quantity": 0,
+                "error": "Invalid product ID"
+            })
+    
+    if invalid_items:
+        return StockValidationResponse(
+            valid=False,
+            message="Some items in your cart are not available in the requested quantities",
+            invalid_items=invalid_items
+        )
+    
+    return StockValidationResponse(
+        valid=True,
+        message="All items are available in stock",
+        invalid_items=[]
+    )
+
 # Order endpoints
 @app.post("/api/orders")
 async def create_order(order_data: OrderCreate):
@@ -262,6 +326,26 @@ async def create_order(order_data: OrderCreate):
     orders_collection = db[ORDERS_COLLECTION]
     users_collection = db[USERS_COLLECTION]
     products_collection = db[PRODUCTS_COLLECTION]
+    
+    # First validate stock availability with detailed error messages
+    stock_validation_items = [
+        StockValidationItem(product_id=item.product_id, quantity=item.quantity) 
+        for item in order_data.items
+    ]
+    stock_request = StockValidationRequest(items=stock_validation_items)
+    validation_result = await validate_stock(stock_request)
+    
+    if not validation_result.valid:
+        # Return detailed stock validation errors
+        error_messages = [item["error"] for item in validation_result.invalid_items]
+        raise HTTPException(
+            status_code=400, 
+            detail={
+                "message": validation_result.message,
+                "errors": error_messages,
+                "invalid_items": validation_result.invalid_items
+            }
+        )
     
     # Create or get user with password hash
     user_data = order_data.user_info.model_dump()
@@ -280,15 +364,8 @@ async def create_order(order_data: OrderCreate):
         user_result = await users_collection.insert_one(user_data)
         user_id = str(user_result.inserted_id)
     
-    # Validate products and calculate total
-    total_amount = 0
-    for item in order_data.items:
-        product = await products_collection.find_one({"_id": ObjectId(item.product_id)})
-        if not product:
-            raise HTTPException(status_code=400, detail=f"Product {item.product_id} not found")
-        if product["quantity"] < item.quantity:
-            raise HTTPException(status_code=400, detail=f"Insufficient stock for product {product['name']}")
-        total_amount += item.total
+    # Calculate total amount (products already validated above)
+    total_amount = sum(item.total for item in order_data.items)
     
     # Create order
     order_doc = {
@@ -567,6 +644,78 @@ async def update_contact_info(contact_update: ContactInfoUpdate):
     
     return serialize_doc(updated_contact)
 
+# Recipe endpoints (public read, admin write)
+@app.get("/api/recipes")
+async def get_recipes():
+    """Get all recipes - public endpoint"""
+    db = await get_database()
+    recipes_collection = db[RECIPES_COLLECTION]
+    
+    recipes = []
+    async for recipe in recipes_collection.find().sort("created_at", -1):
+        recipes.append(serialize_doc(recipe))
+    return recipes
+
+@app.get("/api/recipes/{recipe_id}")
+async def get_recipe(recipe_id: str):
+    """Get single recipe - public endpoint"""
+    db = await get_database()
+    recipes_collection = db[RECIPES_COLLECTION]
+    
+    recipe = await recipes_collection.find_one({"_id": ObjectId(recipe_id)})
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    return serialize_doc(recipe)
+
+@app.post("/api/admin/recipes", dependencies=[Depends(get_current_admin)])
+async def create_recipe(recipe: RecipeCreate):
+    """Create recipe - admin only"""
+    db = await get_database()
+    recipes_collection = db[RECIPES_COLLECTION]
+    
+    recipe_data = {
+        "name": recipe.name,
+        "description": recipe.description,
+        "image_url": None,
+        "pdf_url": None,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow()
+    }
+    
+    result = await recipes_collection.insert_one(recipe_data)
+    recipe_data["_id"] = str(result.inserted_id)
+    return recipe_data
+
+@app.put("/api/admin/recipes/{recipe_id}", dependencies=[Depends(get_current_admin)])
+async def update_recipe(recipe_id: str, recipe: RecipeUpdate):
+    """Update recipe - admin only"""
+    db = await get_database()
+    recipes_collection = db[RECIPES_COLLECTION]
+    
+    update_data = {k: v for k, v in recipe.dict().items() if v is not None}
+    if update_data:
+        update_data["updated_at"] = datetime.utcnow()
+        await recipes_collection.update_one(
+            {"_id": ObjectId(recipe_id)}, 
+            {"$set": update_data}
+        )
+    
+    updated_recipe = await recipes_collection.find_one({"_id": ObjectId(recipe_id)})
+    return serialize_doc(updated_recipe)
+
+@app.delete("/api/admin/recipes/{recipe_id}", dependencies=[Depends(get_current_admin)])
+async def delete_recipe(recipe_id: str):
+    """Delete recipe - admin only"""
+    db = await get_database()
+    recipes_collection = db[RECIPES_COLLECTION]
+    
+    result = await recipes_collection.delete_one({"_id": ObjectId(recipe_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    
+    return {"message": "Recipe deleted successfully"}
+
 # GridFS File Storage endpoints
 @app.get("/api/images/{file_id}")
 async def get_image(file_id: str):
@@ -683,6 +832,97 @@ async def upload_logo(page: str, file: UploadFile = File(...)):
     )
     
     return upload_result
+
+@app.post("/api/admin/recipes/{recipe_id}/image", dependencies=[Depends(get_current_admin)])
+async def upload_recipe_image(recipe_id: str, file: UploadFile = File(...)):
+    """Upload recipe image to GridFS"""
+    # Upload file to GridFS
+    upload_result = await upload_file(file)
+    
+    # Update recipe with image URL
+    db = await get_database()
+    recipes_collection = db[RECIPES_COLLECTION]
+    
+    await recipes_collection.update_one(
+        {"_id": ObjectId(recipe_id)},
+        {"$set": {"image_url": upload_result["url"], "updated_at": datetime.utcnow()}}
+    )
+    
+    return upload_result
+
+@app.post("/api/admin/recipes/{recipe_id}/pdf", dependencies=[Depends(get_current_admin)])
+async def upload_recipe_pdf(recipe_id: str, file: UploadFile = File(...)):
+    """Upload recipe PDF to GridFS"""
+    if not file.content_type == 'application/pdf':
+        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+    
+    try:
+        db = await get_database()
+        fs = AsyncIOMotorGridFSBucket(db)
+        
+        # Create unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}_{file.filename}"
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Store in GridFS
+        file_id = await fs.upload_from_stream(
+            filename,
+            io.BytesIO(file_content),
+            metadata={
+                "content_type": file.content_type,
+                "upload_date": datetime.utcnow(),
+                "original_filename": file.filename
+            }
+        )
+        
+        pdf_result = {
+            "file_id": str(file_id),
+            "filename": filename,
+            "url": f"/api/pdfs/{file_id}"
+        }
+        
+        # Update recipe with PDF URL
+        recipes_collection = db[RECIPES_COLLECTION]
+        await recipes_collection.update_one(
+            {"_id": ObjectId(recipe_id)},
+            {"$set": {"pdf_url": pdf_result["url"], "updated_at": datetime.utcnow()}}
+        )
+        
+        return pdf_result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload PDF: {str(e)}")
+
+@app.get("/api/pdfs/{file_id}")
+async def get_pdf(file_id: str):
+    """Serve PDFs from MongoDB GridFS"""
+    try:
+        db = await get_database()
+        fs = AsyncIOMotorGridFSBucket(db)
+        
+        # Get file from GridFS
+        file_data = await fs.open_download_stream(ObjectId(file_id))
+        
+        # Get file info
+        content_type = file_data.metadata.get("content_type", "application/pdf") if file_data.metadata else "application/pdf"
+        filename = file_data.filename or "recipe.pdf"
+        
+        # Stream the file
+        async def generate_stream():
+            async for chunk in file_data:
+                yield chunk
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type=content_type,
+            headers={"Content-Disposition": f"inline; filename={filename}"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=404, detail="PDF not found")
 
 # Root endpoint
 @app.get("/")

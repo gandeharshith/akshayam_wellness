@@ -119,6 +119,21 @@ class ContactInfo(BaseModel):
     address: str
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+class Recipe(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str}
+    )
+    
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    name: str
+    description: str  # Short description for listing
+    image_url: Optional[str] = None
+    pdf_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
 class Admin(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -166,6 +181,18 @@ class OrderCreate(BaseModel):
     user_info: UserCreate
     items: List[OrderItem]
 
+class StockValidationItem(BaseModel):
+    product_id: str
+    quantity: int
+
+class StockValidationRequest(BaseModel):
+    items: List[StockValidationItem]
+
+class StockValidationResponse(BaseModel):
+    valid: bool
+    message: str
+    invalid_items: List[dict] = []
+
 class OrderStatusUpdate(BaseModel):
     status: str
 
@@ -193,6 +220,14 @@ class ContactInfoUpdate(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+
+class RecipeCreate(BaseModel):
+    name: str
+    description: str
+
+class RecipeUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
 
 class AdminLogin(BaseModel):
     username: str
