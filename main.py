@@ -670,7 +670,7 @@ async def create_content(content: ContentCreate):
     content_data["_id"] = str(result.inserted_id)
     return content_data
 
-@app.put("/api/admin/content/{content_id}", dependencies=[Depends(get_current_admin)])
+@app.put("/api/admin/content/id/{content_id}", dependencies=[Depends(get_current_admin)])
 async def update_content_by_id(content_id: str, content_update: ContentUpdate):
     db = await get_database()
     content_collection = db[CONTENT_COLLECTION]
