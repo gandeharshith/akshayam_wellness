@@ -80,6 +80,34 @@ async def startup_event():
         await admin_collection.insert_one(admin_data)
         print("Default admin user created: username=vivek1995m@gmail.com, password=Vivek@1995")
     
+    # Initialize order field for existing categories that don't have it
+    categories_collection = db[CATEGORIES_COLLECTION]
+    categories_without_order = []
+    async for category in categories_collection.find({"order": {"$exists": False}}):
+        categories_without_order.append(category)
+    
+    if categories_without_order:
+        for i, category in enumerate(categories_without_order, 1):
+            await categories_collection.update_one(
+                {"_id": category["_id"]},
+                {"$set": {"order": i}}
+            )
+        print(f"Initialized order field for {len(categories_without_order)} categories")
+    
+    # Initialize order field for existing products that don't have it
+    products_collection = db[PRODUCTS_COLLECTION]
+    products_without_order = []
+    async for product in products_collection.find({"order": {"$exists": False}}):
+        products_without_order.append(product)
+    
+    if products_without_order:
+        for i, product in enumerate(products_without_order, 1):
+            await products_collection.update_one(
+                {"_id": product["_id"]},
+                {"$set": {"order": i}}
+            )
+        print(f"Initialized order field for {len(products_without_order)} products")
+    
     # Create default content if doesn't exist
     content_collection = db[CONTENT_COLLECTION]
     home_content = await content_collection.find_one({"page": "home"})
@@ -160,19 +188,40 @@ async def get_categories():
     db = await get_database()
     categories_collection = db[CATEGORIES_COLLECTION]
     categories = []
-    async for category in categories_collection.find():
+    async for category in categories_collection.find().sort("order", 1):
         categories.append(serialize_doc(category))
     return categories
+
+# Reorder endpoint must come before the generic {category_id} endpoint
+@app.put("/api/admin/categories/reorder", dependencies=[Depends(get_current_admin)])
+async def reorder_categories(reorder_request: ReorderRequest):
+    """Reorder categories by updating their order field"""
+    db = await get_database()
+    categories_collection = db[CATEGORIES_COLLECTION]
+    
+    # Update each category's order
+    for item in reorder_request.items:
+        await categories_collection.update_one(
+            {"_id": ObjectId(item.id)},
+            {"$set": {"order": item.order}}
+        )
+    
+    return {"message": "Categories reordered successfully"}
 
 @app.post("/api/admin/categories", dependencies=[Depends(get_current_admin)])
 async def create_category(category: CategoryCreate):
     db = await get_database()
     categories_collection = db[CATEGORIES_COLLECTION]
     
+    # Get the next order number
+    last_category = await categories_collection.find_one({}, sort=[("order", -1)])
+    next_order = (last_category.get("order", 0) + 1) if last_category else 1
+    
     category_data = {
         "name": category.name,
         "description": category.description,
         "image_url": None,
+        "order": next_order,
         "created_at": datetime.utcnow()
     }
     
@@ -223,7 +272,7 @@ async def get_products(category_id: Optional[str] = None):
         query["category_id"] = category_id
     
     products = []
-    async for product in products_collection.find(query):
+    async for product in products_collection.find(query).sort("order", 1):
         products.append(serialize_doc(product))
     return products
 
@@ -238,6 +287,22 @@ async def get_product(product_id: str):
     
     return serialize_doc(product)
 
+# Reorder endpoint must come before the generic {product_id} endpoint
+@app.put("/api/admin/products/reorder", dependencies=[Depends(get_current_admin)])
+async def reorder_products(reorder_request: ReorderRequest):
+    """Reorder products by updating their order field"""
+    db = await get_database()
+    products_collection = db[PRODUCTS_COLLECTION]
+    
+    # Update each product's order
+    for item in reorder_request.items:
+        await products_collection.update_one(
+            {"_id": ObjectId(item.id)},
+            {"$set": {"order": item.order}}
+        )
+    
+    return {"message": "Products reordered successfully"}
+
 @app.post("/api/admin/products", dependencies=[Depends(get_current_admin)])
 async def create_product(product: ProductCreate):
     db = await get_database()
@@ -249,6 +314,10 @@ async def create_product(product: ProductCreate):
     if not category:
         raise HTTPException(status_code=400, detail="Invalid category ID")
     
+    # Get the next order number
+    last_product = await products_collection.find_one({}, sort=[("order", -1)])
+    next_order = (last_product.get("order", 0) + 1) if last_product else 1
+    
     product_data = {
         "name": product.name,
         "description": product.description,
@@ -256,6 +325,7 @@ async def create_product(product: ProductCreate):
         "price": product.price,
         "quantity": product.quantity,
         "image_url": None,
+        "order": next_order,
         "created_at": datetime.utcnow()
     }
     
@@ -289,36 +359,6 @@ async def delete_product(product_id: str):
     
     return {"message": "Product deleted successfully"}
 
-# Reorder endpoints
-@app.put("/api/admin/categories/reorder", dependencies=[Depends(get_current_admin)])
-async def reorder_categories(reorder_request: ReorderRequest):
-    """Reorder categories by updating their order field"""
-    db = await get_database()
-    categories_collection = db[CATEGORIES_COLLECTION]
-    
-    # Update each category's order
-    for item in reorder_request.items:
-        await categories_collection.update_one(
-            {"_id": ObjectId(item.id)},
-            {"$set": {"order": item.order}}
-        )
-    
-    return {"message": "Categories reordered successfully"}
-
-@app.put("/api/admin/products/reorder", dependencies=[Depends(get_current_admin)])
-async def reorder_products(reorder_request: ReorderRequest):
-    """Reorder products by updating their order field"""
-    db = await get_database()
-    products_collection = db[PRODUCTS_COLLECTION]
-    
-    # Update each product's order
-    for item in reorder_request.items:
-        await products_collection.update_one(
-            {"_id": ObjectId(item.id)},
-            {"$set": {"order": item.order}}
-        )
-    
-    return {"message": "Products reordered successfully"}
 
 # Stock validation endpoint
 @app.post("/api/validate-stock")
