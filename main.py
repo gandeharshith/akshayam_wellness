@@ -724,26 +724,31 @@ async def get_image(file_id: str):
         db = await get_database()
         fs = AsyncIOMotorGridFSBucket(db)
         
-        # Get file from GridFS
-        file_data = await fs.open_download_stream(ObjectId(file_id))
+        # Download entire file to BytesIO to avoid streaming Unicode issues
+        file_bytes = io.BytesIO()
+        await fs.download_to_stream(ObjectId(file_id), file_bytes)
+        file_bytes.seek(0)
         
-        # Get file info - using grid_out properties directly
-        content_type = file_data.metadata.get("content_type", "image/jpeg") if file_data.metadata else "image/jpeg"
-        filename = file_data.filename or "image"
+        # Use default content type
+        content_type = "image/jpeg"
         
-        # Stream the file
-        async def generate_stream():
-            async for chunk in file_data:
+        # Stream from BytesIO
+        def generate_stream():
+            while True:
+                chunk = file_bytes.read(8192)
+                if not chunk:
+                    break
                 yield chunk
         
         return StreamingResponse(
             generate_stream(),
             media_type=content_type,
-            headers={"Content-Disposition": f"inline; filename={filename}"}
+            headers={"Content-Disposition": "inline"}
         )
         
     except Exception as e:
-        raise HTTPException(status_code=404, detail="Image not found")
+        print(f"Error retrieving image {file_id}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=404, detail=f"Image not found: {str(e)}")
 
 @app.post("/api/admin/upload", dependencies=[Depends(get_current_admin)])
 async def upload_file(file: UploadFile = File(...)):
