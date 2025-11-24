@@ -19,7 +19,8 @@ from database import (
     CONTENT_COLLECTION,
     CONTACT_INFO_COLLECTION,
     ADMINS_COLLECTION,
-    USERS_COLLECTION
+    USERS_COLLECTION,
+    SYSTEM_SETTINGS_COLLECTION
 )
 
 # Define recipes collection constant
@@ -33,7 +34,9 @@ from models import (
     Recipe, RecipeCreate, RecipeUpdate,
     Admin, AdminLogin,
     User, UserCreate, UserLogin,
-    StockValidationRequest, StockValidationResponse, StockValidationItem
+    StockValidationRequest, StockValidationResponse, StockValidationItem,
+    SystemSettings, SystemSettingsUpdate,
+    ReorderRequest, ReorderItem
 )
 from auth import (
     get_password_hash, verify_password, create_access_token,
@@ -98,6 +101,31 @@ async def startup_event():
             "updated_at": datetime.utcnow()
         }
         await content_collection.insert_one(about_data)
+    
+    # Create default delivery schedule content if doesn't exist
+    delivery_content = await content_collection.find_one({"page": "delivery", "section": "schedule"})
+    if not delivery_content:
+        delivery_data = {
+            "page": "delivery",
+            "section": "schedule",
+            "title": "Delivery Schedule",
+            "content": "Orders should be placed before every Wednesday 6 PM and the shipment will be delivered on Sunday",
+            "order": 1,
+            "updated_at": datetime.utcnow()
+        }
+        await content_collection.insert_one(delivery_data)
+    
+    # Create default system settings if they don't exist
+    settings_collection = db[SYSTEM_SETTINGS_COLLECTION]
+    min_order_setting = await settings_collection.find_one({"key": "minimum_order_value"})
+    if not min_order_setting:
+        min_order_data = {
+            "key": "minimum_order_value",
+            "value": 500.0,
+            "description": "Minimum order value required for checkout",
+            "updated_at": datetime.utcnow()
+        }
+        await settings_collection.insert_one(min_order_data)
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -261,6 +289,37 @@ async def delete_product(product_id: str):
     
     return {"message": "Product deleted successfully"}
 
+# Reorder endpoints
+@app.put("/api/admin/categories/reorder", dependencies=[Depends(get_current_admin)])
+async def reorder_categories(reorder_request: ReorderRequest):
+    """Reorder categories by updating their order field"""
+    db = await get_database()
+    categories_collection = db[CATEGORIES_COLLECTION]
+    
+    # Update each category's order
+    for item in reorder_request.items:
+        await categories_collection.update_one(
+            {"_id": ObjectId(item.id)},
+            {"$set": {"order": item.order}}
+        )
+    
+    return {"message": "Categories reordered successfully"}
+
+@app.put("/api/admin/products/reorder", dependencies=[Depends(get_current_admin)])
+async def reorder_products(reorder_request: ReorderRequest):
+    """Reorder products by updating their order field"""
+    db = await get_database()
+    products_collection = db[PRODUCTS_COLLECTION]
+    
+    # Update each product's order
+    for item in reorder_request.items:
+        await products_collection.update_one(
+            {"_id": ObjectId(item.id)},
+            {"$set": {"order": item.order}}
+        )
+    
+    return {"message": "Products reordered successfully"}
+
 # Stock validation endpoint
 @app.post("/api/validate-stock")
 async def validate_stock(stock_request: StockValidationRequest):
@@ -366,6 +425,15 @@ async def create_order(order_data: OrderCreate):
     
     # Calculate total amount (products already validated above)
     total_amount = sum(item.total for item in order_data.items)
+    
+    # Check minimum order value
+    settings_collection = db[SYSTEM_SETTINGS_COLLECTION]
+    min_order_setting = await settings_collection.find_one({"key": "minimum_order_value"})
+    if min_order_setting and total_amount < min_order_setting["value"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Minimum order value is ₹{min_order_setting['value']:.0f}. Your cart total is ₹{total_amount:.0f}. Please add more items to meet the minimum order requirement."
+        )
     
     # Create order
     order_doc = {
@@ -928,6 +996,55 @@ async def get_pdf(file_id: str):
         
     except Exception as e:
         raise HTTPException(status_code=404, detail="PDF not found")
+
+# System Settings endpoints
+@app.get("/api/settings/{key}")
+async def get_system_setting(key: str):
+    """Get a system setting by key (public endpoint)"""
+    db = await get_database()
+    settings_collection = db[SYSTEM_SETTINGS_COLLECTION]
+    
+    setting = await settings_collection.find_one({"key": key})
+    if not setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+    
+    return serialize_doc(setting)
+
+@app.get("/api/admin/settings", dependencies=[Depends(get_current_admin)])
+async def get_all_system_settings():
+    """Get all system settings (admin only)"""
+    db = await get_database()
+    settings_collection = db[SYSTEM_SETTINGS_COLLECTION]
+    
+    settings = []
+    async for setting in settings_collection.find():
+        settings.append(serialize_doc(setting))
+    return settings
+
+@app.put("/api/admin/settings/{key}", dependencies=[Depends(get_current_admin)])
+async def update_system_setting(key: str, setting_update: SystemSettingsUpdate):
+    """Update a system setting (admin only)"""
+    db = await get_database()
+    settings_collection = db[SYSTEM_SETTINGS_COLLECTION]
+    
+    update_data = {
+        "value": setting_update.value,
+        "updated_at": datetime.utcnow()
+    }
+    
+    if setting_update.description is not None:
+        update_data["description"] = setting_update.description
+    
+    result = await settings_collection.update_one(
+        {"key": key},
+        {"$set": update_data}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Setting not found")
+    
+    updated_setting = await settings_collection.find_one({"key": key})
+    return serialize_doc(updated_setting)
 
 # Root endpoint
 @app.get("/")

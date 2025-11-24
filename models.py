@@ -44,6 +44,7 @@ class Category(BaseModel):
     name: str
     description: Optional[str] = ""
     image_url: Optional[str] = None
+    order: int = 0  # For ordering categories
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class Product(BaseModel):
@@ -60,6 +61,7 @@ class Product(BaseModel):
     price: float
     quantity: int
     image_url: Optional[str] = None
+    order: int = 0  # For ordering products
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class OrderItem(BaseModel):
@@ -232,3 +234,27 @@ class RecipeUpdate(BaseModel):
 class AdminLogin(BaseModel):
     username: str
     password: str
+
+class SystemSettings(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str}
+    )
+    
+    id: Optional[PyObjectId] = Field(default_factory=PyObjectId, alias="_id")
+    key: str  # e.g., "minimum_order_value"
+    value: float  # The actual value
+    description: str  # Description of what this setting does
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class SystemSettingsUpdate(BaseModel):
+    value: float
+    description: Optional[str] = None
+
+class ReorderItem(BaseModel):
+    id: str
+    order: int
+
+class ReorderRequest(BaseModel):
+    items: List[ReorderItem]
