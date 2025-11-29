@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # MongoDB connection URL from environment
-MONGODB_URL = os.getenv("MONGODB_URI")
+MONGODB_URL = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 DATABASE_NAME = "akshayam_wellness"
 
 class Database:

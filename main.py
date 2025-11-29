@@ -8,6 +8,10 @@ import io
 from typing import List, Optional
 from bson import ObjectId
 import json
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from database import (
     connect_to_mongo, 
@@ -42,6 +46,7 @@ from auth import (
     get_password_hash, verify_password, create_access_token,
     get_current_admin, ACCESS_TOKEN_EXPIRE_MINUTES, ADMIN_TOKEN_EXPIRE_HOURS
 )
+from email_service import email_service
 
 # Create FastAPI app
 app = FastAPI(title="Akshayam Wellness API", version="1.0.0")
@@ -69,16 +74,23 @@ async def startup_event():
     # Create default admin user if doesn't exist
     db = await get_database()
     admin_collection = db[ADMINS_COLLECTION]
-    existing_admin = await admin_collection.find_one({"username": "vivek1995m@gmail.com"})
+    
+    # Get admin credentials from environment variables
+    admin_username = os.getenv("ADMIN_USERNAME", "admin@akshayamwellness.com")
+    admin_password = os.getenv("ADMIN_PASSWORD", "DefaultPassword123!")
+    admin_email = os.getenv("ADMIN_EMAIL_LOGIN", admin_username)
+    
+    existing_admin = await admin_collection.find_one({"username": admin_username})
     if not existing_admin:
         admin_data = {
-            "username": "vivek1995m@gmail.com",
-            "password_hash": get_password_hash("Vivek@1995"),
-            "email": "vivek1995m@gmail.com",
+            "username": admin_username,
+            "password_hash": get_password_hash(admin_password),
+            "email": admin_email,
             "created_at": datetime.utcnow()
         }
         await admin_collection.insert_one(admin_data)
-        print("Default admin user created: username=vivek1995m@gmail.com, password=Vivek@1995")
+        print(f"Default admin user created: username={admin_username}")
+        print("⚠️ IMPORTANT: Change the default admin credentials in .env file for security!")
     
     # Initialize order field for existing categories that don't have it
     categories_collection = db[CATEGORIES_COLLECTION]
@@ -499,6 +511,14 @@ async def create_order(order_data: OrderCreate):
         )
     
     order_doc["_id"] = str(result.inserted_id)
+    
+    # Send email notification to admin (don't let email failure break order creation)
+    try:
+        await email_service.send_order_notification(order_doc)
+    except Exception as e:
+        # Log the error but don't fail the order creation
+        print(f"Failed to send order notification email: {str(e)}")
+    
     return order_doc
 
 @app.post("/api/user/login")

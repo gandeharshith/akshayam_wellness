@@ -78,11 +78,6 @@ The server will start on `http://localhost:8000`
 - `POST /api/admin/products/{id}/image` - Upload product image
 - `POST /api/admin/content/{page}/logo` - Upload page logo
 
-## Default Admin Credentials
-
-- **Username**: `vivek1995m@gmail.com`
-- **Password**: `Vivek@1995`
-
 ## Database Collections
 
 - `admins` - Admin users
