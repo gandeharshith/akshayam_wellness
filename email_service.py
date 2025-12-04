@@ -278,6 +278,14 @@ Akshayam Wellness System
             user_name = order_data.get("user_name", "Customer")
             subject = f"🛒 New Order #{order_id} from {user_name} - Akshayam Wellness"
             
+            # CRITICAL DEBUGGING: Log all email configuration
+            print(f"🔍 EMAIL DEBUG - Order {order_id}")
+            print(f"📧 Admin Email: {self.admin_email}")
+            print(f"📧 Sender Email: {self.sender_email}")
+            print(f"🌐 SMTP Server: {self.smtp_server}:{self.smtp_port}")
+            print(f"🔑 Has Password: {'Yes' if self.sender_password else 'No'}")
+            print(f"📝 Subject: {subject}")
+            
             # Send email to admin
             success = await self.send_email(
                 to_emails=[self.admin_email],
@@ -287,13 +295,16 @@ Akshayam Wellness System
             )
             
             if success:
+                print(f"📬 EMAIL SERVICE REPORTS SUCCESS for order {order_id}")
                 logger.info(f"Order notification sent successfully for order {order_id}")
             else:
+                print(f"📭 EMAIL SERVICE REPORTS FAILURE for order {order_id}")
                 logger.error(f"Failed to send order notification for order {order_id}")
             
             return success
             
         except Exception as e:
+            print(f"💥 EXCEPTION in send_order_notification for order {order_id}: {str(e)}")
             logger.error(f"Error sending order notification: {str(e)}")
             return False
 
