@@ -50,8 +50,10 @@ class EmailService:
         """
         try:
             if not self.sender_email or not self.sender_password:
-                logger.error("Email service not configured properly")
+                logger.error("Email service not configured properly - Missing credentials")
                 return False
+            
+            logger.info(f"Attempting to send email to {to_emails} via {self.smtp_server}:{self.smtp_port}")
             
             # Create message
             message = MIMEMultipart("alternative")
@@ -78,22 +80,37 @@ class EmailService:
             if bcc_emails:
                 recipients.extend(bcc_emails)
             
-            # Send email using aiosmtplib for async operation
-            await aiosmtplib.send(
-                message,
-                hostname=self.smtp_server,
-                port=self.smtp_port,
-                start_tls=True,
-                username=self.sender_email,
-                password=self.sender_password,
-                recipients=recipients,
-            )
+            logger.info(f"SMTP Configuration: Server={self.smtp_server}, Port={self.smtp_port}, Username={self.sender_email}")
             
-            logger.info(f"Email sent successfully to {to_emails}")
-            return True
+            # Send email using aiosmtplib for async operation with enhanced error handling
+            try:
+                await aiosmtplib.send(
+                    message,
+                    hostname=self.smtp_server,
+                    port=self.smtp_port,
+                    start_tls=True,
+                    username=self.sender_email,
+                    password=self.sender_password,
+                    recipients=recipients,
+                    timeout=30,  # Add timeout to avoid hanging
+                    use_tls=False,  # Use STARTTLS instead of direct TLS
+                    validate_certs=True,  # Validate SSL certificates
+                )
+                
+                logger.info(f"Email sent successfully to {to_emails}")
+                return True
+                
+            except aiosmtplib.SMTPException as smtp_e:
+                logger.error(f"SMTP Error: {type(smtp_e).__name__}: {str(smtp_e)}")
+                return False
+            except Exception as send_e:
+                logger.error(f"Send Error: {type(send_e).__name__}: {str(send_e)}")
+                return False
             
         except Exception as e:
-            logger.error(f"Failed to send email: {str(e)}")
+            logger.error(f"General email error: {type(e).__name__}: {str(e)}")
+            import traceback
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
     
     def format_order_details(self, order_data: dict) -> tuple[str, str]:

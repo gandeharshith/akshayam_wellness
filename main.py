@@ -514,10 +514,18 @@ async def create_order(order_data: OrderCreate):
     
     # Send email notification to admin (don't let email failure break order creation)
     try:
+        print(f"🚀 Attempting to send email notification for order {order_doc['_id']}")
         await email_service.send_order_notification(order_doc)
+        print(f"✅ Email notification sent successfully for order {order_doc['_id']}")
     except Exception as e:
-        # Log the error but don't fail the order creation
-        print(f"Failed to send order notification email: {str(e)}")
+        # Log the error with full details but don't fail the order creation
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"❌ CRITICAL EMAIL ERROR for order {order_doc['_id']}: {str(e)}")
+        print(f"📋 Full error traceback: {error_details}")
+        # Also add error to order document for debugging
+        order_doc["email_error"] = str(e)
+        order_doc["email_error_traceback"] = error_details
     
     return order_doc
 
