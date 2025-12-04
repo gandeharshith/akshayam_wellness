@@ -515,8 +515,12 @@ async def create_order(order_data: OrderCreate):
     # Send email notification to admin (don't let email failure break order creation)
     try:
         print(f"🚀 Attempting to send email notification for order {order_doc['_id']}")
-        await email_service.send_order_notification(order_doc)
-        print(f"✅ Email notification sent successfully for order {order_doc['_id']}")
+        email_success = await email_service.send_order_notification(order_doc)
+        if email_success:
+            print(f"✅ Email notification sent successfully for order {order_doc['_id']}")
+        else:
+            print(f"❌ EMAIL SERVICE FAILED for order {order_doc['_id']} - Check email configuration")
+            order_doc["email_error"] = "Email service returned False - likely SMTP connection issue"
     except Exception as e:
         # Log the error with full details but don't fail the order creation
         import traceback

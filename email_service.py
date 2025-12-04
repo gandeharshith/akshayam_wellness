@@ -35,7 +35,7 @@ class EmailService:
                         cc_emails: Optional[List[str]] = None,
                         bcc_emails: Optional[List[str]] = None) -> bool:
         """
-        Send an email asynchronously
+        Send an email asynchronously with enhanced Gmail SMTP connection handling
         
         Args:
             to_emails: List of recipient email addresses
@@ -53,7 +53,8 @@ class EmailService:
                 logger.error("Email service not configured properly - Missing credentials")
                 return False
             
-            logger.info(f"Attempting to send email to {to_emails} via {self.smtp_server}:{self.smtp_port}")
+            print(f"📧 ENHANCED GMAIL SMTP - Attempting email to {to_emails}")
+            print(f"🔧 Using {self.smtp_server}:{self.smtp_port}")
             
             # Create message
             message = MIMEMultipart("alternative")
@@ -80,34 +81,78 @@ class EmailService:
             if bcc_emails:
                 recipients.extend(bcc_emails)
             
-            logger.info(f"SMTP Configuration: Server={self.smtp_server}, Port={self.smtp_port}, Username={self.sender_email}")
+            # Enhanced Gmail SMTP configuration with retry mechanism
+            max_retries = 3
+            retry_delay = 2  # seconds
             
-            # Send email using aiosmtplib for async operation with enhanced error handling
-            try:
-                await aiosmtplib.send(
-                    message,
-                    hostname=self.smtp_server,
-                    port=self.smtp_port,
-                    start_tls=True,
-                    username=self.sender_email,
-                    password=self.sender_password,
-                    recipients=recipients,
-                    timeout=30,  # Add timeout to avoid hanging
-                    use_tls=False,  # Use STARTTLS instead of direct TLS
-                    validate_certs=True,  # Validate SSL certificates
-                )
-                
-                logger.info(f"Email sent successfully to {to_emails}")
-                return True
-                
-            except aiosmtplib.SMTPException as smtp_e:
-                logger.error(f"SMTP Error: {type(smtp_e).__name__}: {str(smtp_e)}")
-                return False
-            except Exception as send_e:
-                logger.error(f"Send Error: {type(send_e).__name__}: {str(send_e)}")
-                return False
+            for attempt in range(max_retries):
+                try:
+                    print(f"🔄 Attempt {attempt + 1}/{max_retries} - Connecting to Gmail SMTP...")
+                    
+                    # Determine connection settings based on port
+                    if self.smtp_port == 465:
+                        # Port 465: Use direct TLS/SSL connection
+                        print("🔒 Using SSL/TLS on port 465")
+                        await aiosmtplib.send(
+                            message,
+                            hostname=self.smtp_server,
+                            port=self.smtp_port,
+                            use_tls=True,  # Direct TLS for port 465
+                            start_tls=False,  # Don't use STARTTLS for port 465
+                            username=self.sender_email,
+                            password=self.sender_password,
+                            recipients=recipients,
+                            timeout=60,  # Increased timeout for production
+                            validate_certs=True,
+                        )
+                    else:
+                        # Port 587: Use STARTTLS
+                        print("🔐 Using STARTTLS on port 587")
+                        await aiosmtplib.send(
+                            message,
+                            hostname=self.smtp_server,
+                            port=self.smtp_port,
+                            use_tls=False,  # No direct TLS for port 587
+                            start_tls=True,  # Use STARTTLS for port 587
+                            username=self.sender_email,
+                            password=self.sender_password,
+                            recipients=recipients,
+                            timeout=60,  # Increased timeout for production
+                            validate_certs=True,
+                        )
+                    
+                    print(f"✅ Email sent successfully on attempt {attempt + 1}")
+                    logger.info(f"Email sent successfully to {to_emails} on attempt {attempt + 1}")
+                    return True
+                    
+                except (aiosmtplib.SMTPConnectTimeoutError, 
+                        aiosmtplib.SMTPServerDisconnected,
+                        ConnectionError,
+                        OSError) as conn_e:
+                    print(f"⚠️ Connection attempt {attempt + 1} failed: {type(conn_e).__name__}: {str(conn_e)}")
+                    if attempt < max_retries - 1:
+                        print(f"⏳ Retrying in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                    else:
+                        print(f"❌ All {max_retries} connection attempts failed")
+                        logger.error(f"SMTP Connection failed after {max_retries} attempts: {str(conn_e)}")
+                        return False
+                        
+                except aiosmtplib.SMTPException as smtp_e:
+                    print(f"❌ SMTP Error on attempt {attempt + 1}: {type(smtp_e).__name__}: {str(smtp_e)}")
+                    logger.error(f"SMTP Error: {type(smtp_e).__name__}: {str(smtp_e)}")
+                    return False
+                    
+                except Exception as send_e:
+                    print(f"❌ Send Error on attempt {attempt + 1}: {type(send_e).__name__}: {str(send_e)}")
+                    logger.error(f"Send Error: {type(send_e).__name__}: {str(send_e)}")
+                    return False
+            
+            return False  # Should not reach here
             
         except Exception as e:
+            print(f"💥 General email error: {type(e).__name__}: {str(e)}")
             logger.error(f"General email error: {type(e).__name__}: {str(e)}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
