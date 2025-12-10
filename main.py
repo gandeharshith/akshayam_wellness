@@ -1,13 +1,14 @@
-from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, File, UploadFile, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorGridFSBucket
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 import os
 import io
 from typing import List, Optional
 from bson import ObjectId
 import json
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -32,7 +33,7 @@ RECIPES_COLLECTION = "recipes"
 from models import (
     Category, CategoryCreate, CategoryUpdate,
     Product, ProductCreate, ProductUpdate,
-    Order, OrderCreate, OrderStatusUpdate, OrderItem,
+    Order, OrderCreate, OrderStatusUpdate, OrderItem, OrderEditRequest, OrderItemUpdate,
     Content, ContentCreate, ContentUpdate,
     ContactInfo, ContactInfoUpdate,
     Recipe, RecipeCreate, RecipeUpdate,
@@ -40,7 +41,7 @@ from models import (
     User, UserCreate, UserLogin,
     StockValidationRequest, StockValidationResponse, StockValidationItem,
     SystemSettings, SystemSettingsUpdate,
-    ReorderRequest, ReorderItem
+    ReorderRequest, ReorderItem, UserOrderEditRequest
 )
 from auth import (
     get_password_hash, verify_password, create_access_token,
@@ -86,7 +87,7 @@ async def startup_event():
             "username": admin_username,
             "password_hash": get_password_hash(admin_password),
             "email": admin_email,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.now(UTC)
         }
         await admin_collection.insert_one(admin_data)
         print(f"Default admin user created: username={admin_username}")
@@ -128,7 +129,7 @@ async def startup_event():
             "page": "home",
             "title": "Welcome to Akshayam Wellness",
             "content": "Your trusted partner in organic wellness products. We provide high-quality, natural products to enhance your healthy lifestyle.",
-            "updated_at": datetime.utcnow()
+            "updated_at": datetime.now(UTC)
         }
         await content_collection.insert_one(home_data)
     
@@ -138,7 +139,7 @@ async def startup_event():
             "page": "about",
             "title": "About Akshayam Wellness",
             "content": "Founded with a mission to provide pure, organic products, Akshayam Wellness has been serving customers with premium quality natural products. Our commitment to sustainability and health drives everything we do.",
-            "updated_at": datetime.utcnow()
+            "updated_at": datetime.now(UTC)
         }
         await content_collection.insert_one(about_data)
     
@@ -151,7 +152,7 @@ async def startup_event():
             "title": "Delivery Schedule",
             "content": "Orders should be placed before every Wednesday 6 PM and the shipment will be delivered on Sunday",
             "order": 1,
-            "updated_at": datetime.utcnow()
+            "updated_at": datetime.now(UTC)
         }
         await content_collection.insert_one(delivery_data)
     
@@ -163,7 +164,7 @@ async def startup_event():
             "key": "minimum_order_value",
             "value": 500.0,
             "description": "Minimum order value required for checkout",
-            "updated_at": datetime.utcnow()
+            "updated_at": datetime.now(UTC)
         }
         await settings_collection.insert_one(min_order_data)
 
@@ -176,6 +177,52 @@ def serialize_doc(doc):
     if doc:
         doc["_id"] = str(doc["_id"])
     return doc
+
+# Background task for sending email notifications
+async def send_order_email_background(order_doc: dict):
+    """Background task to send order notification email without blocking the API response"""
+    try:
+        print(f"🚀 Background: Attempting to send email notification for order {order_doc['_id']}")
+        
+        # Add retry logic for email sending
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                email_success = await email_service.send_order_notification(order_doc)
+                if email_success:
+                    print(f"✅ Background: Email notification sent successfully for order {order_doc['_id']} (attempt {attempt + 1})")
+                    return
+                else:
+                    print(f"❌ Background: Email service returned False for order {order_doc['_id']} (attempt {attempt + 1})")
+            except Exception as e:
+                print(f"❌ Background: Email attempt {attempt + 1} failed for order {order_doc['_id']}: {str(e)}")
+                if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+        
+        # If all retries failed, log the final failure
+        print(f"❌ Background: All email attempts failed for order {order_doc['_id']} after {max_retries} retries")
+        
+        # Optionally, you could update the order document in the database to flag email failure
+        # This would allow admins to see which orders didn't get email notifications
+        try:
+            db = await get_database()
+            orders_collection = db[ORDERS_COLLECTION]
+            await orders_collection.update_one(
+                {"_id": ObjectId(order_doc['_id'])},
+                {"$set": {"email_notification_failed": True, "email_failure_timestamp": datetime.now(UTC)}}
+            )
+        except Exception as db_e:
+            print(f"❌ Background: Failed to update order email failure status: {str(db_e)}")
+            
+    except Exception as e:
+        # Log any unexpected errors in the background task
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"❌ Background: Critical error in email background task for order {order_doc['_id']}: {str(e)}")
+        print(f"📋 Background: Full error traceback: {error_details}")
 
 # Authentication endpoints
 @app.post("/api/admin/login")
@@ -234,7 +281,7 @@ async def create_category(category: CategoryCreate):
         "description": category.description,
         "image_url": None,
         "order": next_order,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(UTC)
     }
     
     result = await categories_collection.insert_one(category_data)
@@ -338,7 +385,7 @@ async def create_product(product: ProductCreate):
         "quantity": product.quantity,
         "image_url": None,
         "order": next_order,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(UTC)
     }
     
     result = await products_collection.insert_one(product_data)
@@ -432,7 +479,7 @@ async def validate_stock(stock_request: StockValidationRequest):
 
 # Order endpoints
 @app.post("/api/orders")
-async def create_order(order_data: OrderCreate):
+async def create_order(order_data: OrderCreate, background_tasks: BackgroundTasks):
     db = await get_database()
     orders_collection = db[ORDERS_COLLECTION]
     users_collection = db[USERS_COLLECTION]
@@ -461,7 +508,7 @@ async def create_order(order_data: OrderCreate):
     # Create or get user with password hash
     user_data = order_data.user_info.model_dump()
     user_data["password_hash"] = get_password_hash(user_data.pop("password"))
-    user_data["created_at"] = datetime.utcnow()
+    user_data["created_at"] = datetime.now(UTC)
     
     existing_user = await users_collection.find_one({"email": user_data["email"]})
     if existing_user:
@@ -497,8 +544,8 @@ async def create_order(order_data: OrderCreate):
         "items": [item.dict() for item in order_data.items],
         "total_amount": total_amount,
         "status": "pending",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC)
     }
     
     result = await orders_collection.insert_one(order_doc)
@@ -512,25 +559,12 @@ async def create_order(order_data: OrderCreate):
     
     order_doc["_id"] = str(result.inserted_id)
     
-    # Send email notification to admin (don't let email failure break order creation)
-    try:
-        print(f"🚀 Attempting to send email notification for order {order_doc['_id']}")
-        email_success = await email_service.send_order_notification(order_doc)
-        if email_success:
-            print(f"✅ Email notification sent successfully for order {order_doc['_id']}")
-        else:
-            print(f"❌ EMAIL SERVICE FAILED for order {order_doc['_id']} - Check email configuration")
-            order_doc["email_error"] = "Email service returned False - likely SMTP connection issue"
-    except Exception as e:
-        # Log the error with full details but don't fail the order creation
-        import traceback
-        error_details = traceback.format_exc()
-        print(f"❌ CRITICAL EMAIL ERROR for order {order_doc['_id']}: {str(e)}")
-        print(f"📋 Full error traceback: {error_details}")
-        # Also add error to order document for debugging
-        order_doc["email_error"] = str(e)
-        order_doc["email_error_traceback"] = error_details
+    # Add email notification as background task to avoid blocking order creation
+    print(f"📧 Scheduling background email notification for order {order_doc['_id']}")
+    background_tasks.add_task(send_order_email_background, order_doc.copy())
     
+    # Return order immediately without waiting for email
+    print(f"✅ Order {order_doc['_id']} created successfully - email notification scheduled in background")
     return order_doc
 
 @app.post("/api/user/login")
@@ -578,7 +612,7 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
     
     result = await orders_collection.update_one(
         {"_id": ObjectId(order_id)},
-        {"$set": {"status": status_update.status, "updated_at": datetime.utcnow()}}
+        {"$set": {"status": status_update.status, "updated_at": datetime.now(UTC)}}
     )
     
     if result.matched_count == 0:
@@ -586,6 +620,250 @@ async def update_order_status(order_id: str, status_update: OrderStatusUpdate):
     
     updated_order = await orders_collection.find_one({"_id": ObjectId(order_id)})
     return serialize_doc(updated_order)
+
+@app.put("/api/orders/{order_id}/edit")
+async def edit_order(order_id: str, user_order_edit: UserOrderEditRequest):
+    """Edit order items for orders with status 'pending' or 'confirmed' - user authentication included in request"""
+    try:
+        db = await get_database()
+        orders_collection = db[ORDERS_COLLECTION]
+        users_collection = db[USERS_COLLECTION]
+        products_collection = db[PRODUCTS_COLLECTION]
+        
+        # Verify order exists and get current order
+        order = await orders_collection.find_one({"_id": ObjectId(order_id)})
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Check if order can be edited (only pending or confirmed)
+        if order["status"] not in ["pending", "confirmed"]:
+            raise HTTPException(status_code=400, detail=f"Cannot edit order with status '{order['status']}'. Orders can only be edited when status is 'pending' or 'confirmed'.")
+        
+        # Verify user credentials (user must own the order)
+        user = await users_collection.find_one({"email": user_order_edit.email})
+        if not user or not verify_password(user_order_edit.password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        # Check if user owns this order
+        if order["user_email"] != user_order_edit.email:
+            raise HTTPException(status_code=403, detail="You can only edit your own orders")
+        
+        # Validate all products exist and have sufficient stock
+        for item in user_order_edit.items:
+            product = await products_collection.find_one({"_id": ObjectId(item.product_id)})
+            if not product:
+                raise HTTPException(status_code=400, detail=f"Product {item.product_name} not found")
+        
+        # Restore stock from original order items
+        for original_item in order["items"]:
+            await products_collection.update_one(
+                {"_id": ObjectId(original_item["product_id"])},
+                {"$inc": {"quantity": original_item["quantity"]}}
+            )
+        
+        # Check stock availability for new quantities
+        for item in user_order_edit.items:
+            product = await products_collection.find_one({"_id": ObjectId(item.product_id)})
+            if product["quantity"] < item.quantity:
+                # Restore the original order if stock validation fails
+                for original_item in order["items"]:
+                    await products_collection.update_one(
+                        {"_id": ObjectId(original_item["product_id"])},
+                        {"$inc": {"quantity": -original_item["quantity"]}}
+                    )
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"{product['name']} has only {product['quantity']} items available, but you requested {item.quantity}"
+                )
+        
+        # Deduct stock for new quantities
+        for item in user_order_edit.items:
+            await products_collection.update_one(
+                {"_id": ObjectId(item.product_id)},
+                {"$inc": {"quantity": -item.quantity}}
+            )
+        
+        # Calculate new total amount
+        new_total_amount = sum(item.total for item in user_order_edit.items)
+        
+        # Check minimum order value
+        settings_collection = db[SYSTEM_SETTINGS_COLLECTION]
+        min_order_setting = await settings_collection.find_one({"key": "minimum_order_value"})
+        if min_order_setting and new_total_amount < min_order_setting["value"]:
+            # Restore the original order if min order validation fails
+            for item in user_order_edit.items:
+                await products_collection.update_one(
+                    {"_id": ObjectId(item.product_id)},
+                    {"$inc": {"quantity": item.quantity}}
+                )
+            for original_item in order["items"]:
+                await products_collection.update_one(
+                    {"_id": ObjectId(original_item["product_id"])},
+                    {"$inc": {"quantity": -original_item["quantity"]}}
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Minimum order value is ₹{min_order_setting['value']:.0f}. Your updated cart total is ₹{new_total_amount:.0f}. Please add more items to meet the minimum order requirement."
+            )
+        
+        # Update order with new items and user info if provided
+        update_data = {
+            "items": [item.dict() for item in user_order_edit.items],
+            "total_amount": new_total_amount,
+            "updated_at": datetime.now(UTC)
+        }
+        
+        # Update user info if provided
+        if user_order_edit.user_info:
+            update_data.update({
+                "user_name": user_order_edit.user_info.name,
+                "user_email": user_order_edit.user_info.email,
+                "user_phone": user_order_edit.user_info.phone,
+                "user_address": user_order_edit.user_info.address
+            })
+            
+            # Update user record - only hash password if it's actually being changed
+            user_update_data = {
+                "name": user_order_edit.user_info.name,
+                "email": user_order_edit.user_info.email,
+                "phone": user_order_edit.user_info.phone,
+                "address": user_order_edit.user_info.address
+            }
+            
+            # Only update password if it's different from current password
+            if not verify_password(user_order_edit.user_info.password, user["password_hash"]):
+                user_update_data["password_hash"] = get_password_hash(user_order_edit.user_info.password)
+            
+            await users_collection.update_one(
+                {"_id": user["_id"]},
+                {"$set": user_update_data}
+            )
+        
+        # Update the order
+        result = await orders_collection.update_one(
+            {"_id": ObjectId(order_id)},
+            {"$set": update_data}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        updated_order = await orders_collection.find_one({"_id": ObjectId(order_id)})
+        return serialize_doc(updated_order)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log error and return generic error message
+        print(f"Error editing order {order_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to edit order")
+
+@app.put("/api/admin/orders/{order_id}/edit", dependencies=[Depends(get_current_admin)])
+async def admin_edit_order(order_id: str, order_edit: OrderEditRequest):
+    """Admin version of order editing - no authentication required for user"""
+    try:
+        db = await get_database()
+        orders_collection = db[ORDERS_COLLECTION]
+        products_collection = db[PRODUCTS_COLLECTION]
+        users_collection = db[USERS_COLLECTION]
+        
+        # Verify order exists and get current order
+        order = await orders_collection.find_one({"_id": ObjectId(order_id)})
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        # Check if order can be edited (only pending or confirmed)
+        if order["status"] not in ["pending", "confirmed"]:
+            raise HTTPException(status_code=400, detail=f"Cannot edit order with status '{order['status']}'. Orders can only be edited when status is 'pending' or 'confirmed'.")
+        
+        # Validate all products exist
+        for item in order_edit.items:
+            product = await products_collection.find_one({"_id": ObjectId(item.product_id)})
+            if not product:
+                raise HTTPException(status_code=400, detail=f"Product {item.product_name} not found")
+        
+        # Restore stock from original order items
+        for original_item in order["items"]:
+            await products_collection.update_one(
+                {"_id": ObjectId(original_item["product_id"])},
+                {"$inc": {"quantity": original_item["quantity"]}}
+            )
+        
+        # Check stock availability for new quantities
+        for item in order_edit.items:
+            product = await products_collection.find_one({"_id": ObjectId(item.product_id)})
+            if product["quantity"] < item.quantity:
+                # Restore the original order if stock validation fails
+                for original_item in order["items"]:
+                    await products_collection.update_one(
+                        {"_id": ObjectId(original_item["product_id"])},
+                        {"$inc": {"quantity": -original_item["quantity"]}}
+                    )
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"{product['name']} has only {product['quantity']} items available, but you requested {item.quantity}"
+                )
+        
+        # Deduct stock for new quantities
+        for item in order_edit.items:
+            await products_collection.update_one(
+                {"_id": ObjectId(item.product_id)},
+                {"$inc": {"quantity": -item.quantity}}
+            )
+        
+        # Calculate new total amount
+        new_total_amount = sum(item.total for item in order_edit.items)
+        
+        # Update order with new items and user info if provided
+        update_data = {
+            "items": [item.dict() for item in order_edit.items],
+            "total_amount": new_total_amount,
+            "updated_at": datetime.now(UTC)
+        }
+        
+        # Update user info if provided
+        if order_edit.user_info:
+            update_data.update({
+                "user_name": order_edit.user_info.name,
+                "user_email": order_edit.user_info.email,
+                "user_phone": order_edit.user_info.phone,
+                "user_address": order_edit.user_info.address
+            })
+            
+            # Update user record but DO NOT update password from admin edit
+            # Admin editing should not change user's authentication credentials
+            user = await users_collection.find_one({"email": order["user_email"]})
+            if user:
+                user_update_data = {
+                    "name": order_edit.user_info.name,
+                    "email": order_edit.user_info.email,
+                    "phone": order_edit.user_info.phone,
+                    "address": order_edit.user_info.address
+                    # Deliberately not updating password_hash to preserve user's original password
+                }
+                await users_collection.update_one(
+                    {"_id": user["_id"]},
+                    {"$set": user_update_data}
+                )
+        
+        # Update the order
+        result = await orders_collection.update_one(
+            {"_id": ObjectId(order_id)},
+            {"$set": update_data}
+        )
+        
+        if result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        updated_order = await orders_collection.find_one({"_id": ObjectId(order_id)})
+        return serialize_doc(updated_order)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Log error and return generic error message
+        print(f"Error editing order {order_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to edit order")
 
 @app.delete("/api/admin/orders/{order_id}", dependencies=[Depends(get_current_admin)])
 async def delete_order(order_id: str):
@@ -643,7 +921,7 @@ async def update_content(page: str, content_update: ContentUpdate):
     content_collection = db[CONTENT_COLLECTION]
     
     update_data = {k: v for k, v in content_update.dict().items() if v is not None}
-    update_data["updated_at"] = datetime.utcnow()
+    update_data["updated_at"] = datetime.now(UTC)
     
     result = await content_collection.update_one(
         {"page": page},
@@ -695,7 +973,7 @@ async def create_content(content: ContentCreate):
         "content": content.content,
         "order": content.order,
         "logo_url": None,
-        "updated_at": datetime.utcnow()
+        "updated_at": datetime.now(UTC)
     }
     
     result = await content_collection.insert_one(content_data)
@@ -708,7 +986,7 @@ async def update_content_by_id(content_id: str, content_update: ContentUpdate):
     content_collection = db[CONTENT_COLLECTION]
     
     update_data = {k: v for k, v in content_update.dict().items() if v is not None}
-    update_data["updated_at"] = datetime.utcnow()
+    update_data["updated_at"] = datetime.now(UTC)
     
     result = await content_collection.update_one(
         {"_id": ObjectId(content_id)},
@@ -757,7 +1035,7 @@ async def update_contact_info(contact_update: ContactInfoUpdate):
     contact_collection = db[CONTACT_INFO_COLLECTION]
     
     update_data = {k: v for k, v in contact_update.dict().items() if v is not None}
-    update_data["updated_at"] = datetime.utcnow()
+    update_data["updated_at"] = datetime.now(UTC)
     
     # Check if contact info exists
     existing = await contact_collection.find_one()
@@ -775,7 +1053,7 @@ async def update_contact_info(contact_update: ContactInfoUpdate):
             "email": "info@akshayamwellness.com",
             "phone": "+91-9876543210",
             "address": "123 Wellness Street, Organic City",
-            "updated_at": datetime.utcnow()
+            "updated_at": datetime.now(UTC)
         }
         contact_data.update(update_data)
         
@@ -819,8 +1097,8 @@ async def create_recipe(recipe: RecipeCreate):
         "description": recipe.description,
         "image_url": None,
         "pdf_url": None,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC)
     }
     
     result = await recipes_collection.insert_one(recipe_data)
@@ -835,7 +1113,7 @@ async def update_recipe(recipe_id: str, recipe: RecipeUpdate):
     
     update_data = {k: v for k, v in recipe.dict().items() if v is not None}
     if update_data:
-        update_data["updated_at"] = datetime.utcnow()
+        update_data["updated_at"] = datetime.now(UTC)
         await recipes_collection.update_one(
             {"_id": ObjectId(recipe_id)}, 
             {"$set": update_data}
@@ -913,7 +1191,7 @@ async def upload_file(file: UploadFile = File(...)):
             io.BytesIO(file_content),
             metadata={
                 "content_type": file.content_type,
-                "upload_date": datetime.utcnow(),
+                "upload_date": datetime.now(UTC),
                 "original_filename": file.filename
             }
         )
@@ -973,7 +1251,7 @@ async def upload_logo(page: str, file: UploadFile = File(...)):
     
     await content_collection.update_one(
         {"page": page},
-        {"$set": {"logo_url": upload_result["url"], "updated_at": datetime.utcnow()}}
+        {"$set": {"logo_url": upload_result["url"], "updated_at": datetime.now(UTC)}}
     )
     
     return upload_result
@@ -990,7 +1268,7 @@ async def upload_recipe_image(recipe_id: str, file: UploadFile = File(...)):
     
     await recipes_collection.update_one(
         {"_id": ObjectId(recipe_id)},
-        {"$set": {"image_url": upload_result["url"], "updated_at": datetime.utcnow()}}
+        {"$set": {"image_url": upload_result["url"], "updated_at": datetime.now(UTC)}}
     )
     
     return upload_result
@@ -1018,7 +1296,7 @@ async def upload_recipe_pdf(recipe_id: str, file: UploadFile = File(...)):
             io.BytesIO(file_content),
             metadata={
                 "content_type": file.content_type,
-                "upload_date": datetime.utcnow(),
+                "upload_date": datetime.now(UTC),
                 "original_filename": file.filename
             }
         )
@@ -1033,7 +1311,7 @@ async def upload_recipe_pdf(recipe_id: str, file: UploadFile = File(...)):
         recipes_collection = db[RECIPES_COLLECTION]
         await recipes_collection.update_one(
             {"_id": ObjectId(recipe_id)},
-            {"$set": {"pdf_url": pdf_result["url"], "updated_at": datetime.utcnow()}}
+            {"$set": {"pdf_url": pdf_result["url"], "updated_at": datetime.now(UTC)}}
         )
         
         return pdf_result
@@ -1101,7 +1379,7 @@ async def update_system_setting(key: str, setting_update: SystemSettingsUpdate):
     
     update_data = {
         "value": setting_update.value,
-        "updated_at": datetime.utcnow()
+        "updated_at": datetime.now(UTC)
     }
     
     if setting_update.description is not None:
@@ -1126,7 +1404,7 @@ async def root():
 # Health check
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow()}
+    return {"status": "healthy", "timestamp": datetime.now(UTC)}
 
 
 if __name__ == "__main__":

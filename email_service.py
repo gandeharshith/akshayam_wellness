@@ -7,7 +7,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 import os
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, UTC
 import asyncio
 import logging
 
@@ -176,14 +176,14 @@ class EmailService:
         user_address = order_data.get("user_address", "")
         total_amount = order_data.get("total_amount", 0)
         items = order_data.get("items", [])
-        created_at = order_data.get("created_at", datetime.utcnow())
+        created_at = order_data.get("created_at", datetime.now(UTC))
         
         # Format creation date
         if isinstance(created_at, str):
             try:
                 created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
             except:
-                created_at = datetime.utcnow()
+                created_at = datetime.now(UTC)
         
         formatted_date = created_at.strftime("%B %d, %Y at %I:%M %p")
         

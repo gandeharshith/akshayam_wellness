@@ -6,7 +6,7 @@ Run this to test if email notifications are working correctly
 
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, UTC
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -63,7 +63,7 @@ async def test_email_notification():
             }
         ],
         "total_amount": 550.0,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(UTC)
     }
     
     print("📧 Sending test order notification...")

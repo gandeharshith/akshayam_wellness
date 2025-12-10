@@ -198,6 +198,17 @@ class StockValidationResponse(BaseModel):
 class OrderStatusUpdate(BaseModel):
     status: str
 
+class OrderItemUpdate(BaseModel):
+    product_id: str
+    product_name: str
+    quantity: int
+    price: float
+    total: float
+
+class OrderEditRequest(BaseModel):
+    items: List[OrderItemUpdate]
+    user_info: Optional[UserCreate] = None  # Allow updating user info
+
 class ContentCreate(BaseModel):
     page: str
     section: str
@@ -258,3 +269,10 @@ class ReorderItem(BaseModel):
 
 class ReorderRequest(BaseModel):
     items: List[ReorderItem]
+
+class UserOrderEditRequest(BaseModel):
+    """Combined model for user order editing that includes both order data and authentication"""
+    items: List[OrderItemUpdate]
+    user_info: Optional[UserCreate] = None
+    email: str  # User email for authentication
+    password: str  # User password for authentication
