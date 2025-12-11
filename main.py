@@ -877,31 +877,209 @@ async def delete_order(order_id: str):
     return {"message": "Order deleted successfully"}
 
 @app.get("/api/admin/orders/analytics", dependencies=[Depends(get_current_admin)])
-async def get_order_analytics():
+async def get_order_analytics(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    group_by: Optional[str] = "product"
+):
+    """Get order analytics with optional date filtering and grouping"""
     db = await get_database()
     orders_collection = db[ORDERS_COLLECTION]
     
-    # Aggregate total quantity per product
+    # Build date filter
+    match_stage = {}
+    if start_date or end_date:
+        date_filter = {}
+        if start_date:
+            date_filter["$gte"] = datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(tzinfo=UTC)
+        if end_date:
+            date_filter["$lte"] = datetime.fromisoformat(end_date.replace('Z', '+00:00')).replace(tzinfo=UTC)
+        match_stage["created_at"] = date_filter
+    
+    if group_by == "week":
+        # Weekly analytics - aggregate total quantities and revenue by week
+        pipeline = [
+            {"$match": match_stage},
+            {"$unwind": "$items"},  # Unwind to access individual items
+            {"$group": {
+                "_id": {
+                    "year": {"$year": "$created_at"},
+                    "week": {"$week": "$created_at"}
+                },
+                "order_count": {"$addToSet": "$_id"},  # Count unique orders
+                "total_quantity": {"$sum": "$items.quantity"},  # Sum all item quantities
+                "total_revenue": {"$sum": "$items.total"},  # Sum all item totals
+                "total_items": {"$sum": 1}  # Count individual item entries
+            }},
+            {"$project": {
+                "_id": 1,
+                "order_count": {"$size": "$order_count"},  # Convert set to count
+                "total_quantity": 1,
+                "total_revenue": 1,
+                "total_items": 1
+            }},
+            {"$sort": {"_id.year": -1, "_id.week": -1}},
+            {"$limit": 52}  # Last 52 weeks max
+        ]
+        
+        analytics = []
+        async for result in orders_collection.aggregate(pipeline):
+            year = result["_id"]["year"]
+            week = result["_id"]["week"]
+            
+            analytics.append({
+                "product_id": f"week-{year}-{week}",  # Unique identifier for frontend
+                "product_name": f"Week {week}, {year}",
+                "period": f"Week {week}, {year}",
+                "total_quantity": result["total_quantity"],
+                "total_revenue": result["total_revenue"],
+                "order_count": result["order_count"]
+            })
+        
+        return analytics
+        
+    elif group_by == "month":
+        # Monthly analytics - aggregate total quantities and revenue by month
+        pipeline = [
+            {"$match": match_stage},
+            {"$unwind": "$items"},  # Unwind to access individual items
+            {"$group": {
+                "_id": {
+                    "year": {"$year": "$created_at"},
+                    "month": {"$month": "$created_at"}
+                },
+                "order_count": {"$addToSet": "$_id"},  # Count unique orders
+                "total_quantity": {"$sum": "$items.quantity"},  # Sum all item quantities
+                "total_revenue": {"$sum": "$items.total"},  # Sum all item totals
+                "total_items": {"$sum": 1}  # Count individual item entries
+            }},
+            {"$project": {
+                "_id": 1,
+                "order_count": {"$size": "$order_count"},  # Convert set to count
+                "total_quantity": 1,
+                "total_revenue": 1,
+                "total_items": 1
+            }},
+            {"$sort": {"_id.year": -1, "_id.month": -1}},
+            {"$limit": 24}  # Last 24 months max
+        ]
+        
+        analytics = []
+        month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        
+        async for result in orders_collection.aggregate(pipeline):
+            year = result["_id"]["year"]
+            month = result["_id"]["month"]
+            
+            analytics.append({
+                "product_id": f"month-{year}-{month}",  # Unique identifier for frontend
+                "product_name": f"{month_names[month]} {year}",
+                "period": f"{month_names[month]} {year}",
+                "total_quantity": result["total_quantity"],
+                "total_revenue": result["total_revenue"],
+                "order_count": result["order_count"]
+            })
+        
+        return analytics
+    
+    else:
+        # Product analytics (default)
+        pipeline = [
+            {"$match": match_stage},
+            {"$unwind": "$items"},
+            {"$group": {
+                "_id": "$items.product_id",
+                "product_name": {"$first": "$items.product_name"},
+                "total_quantity": {"$sum": "$items.quantity"},
+                "total_revenue": {"$sum": "$items.total"},
+                "order_count": {"$sum": 1},
+                "avg_quantity_per_order": {"$avg": "$items.quantity"},
+                "avg_revenue_per_order": {"$avg": "$items.total"}
+            }},
+            {"$sort": {"total_revenue": -1}}
+        ]
+        
+        analytics = []
+        async for result in orders_collection.aggregate(pipeline):
+            analytics.append({
+                "product_id": result["_id"],
+                "product_name": result["product_name"],
+                "total_quantity": result["total_quantity"],
+                "total_revenue": result["total_revenue"],
+                "order_count": result["order_count"],
+                "avg_quantity_per_order": result.get("avg_quantity_per_order", 0),
+                "avg_revenue_per_order": result.get("avg_revenue_per_order", 0)
+            })
+        
+        return analytics
+
+@app.get("/api/admin/orders/summary", dependencies=[Depends(get_current_admin)])
+async def get_orders_summary(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """Get overall orders summary with optional date filtering"""
+    db = await get_database()
+    orders_collection = db[ORDERS_COLLECTION]
+    
+    # Build date filter
+    match_stage = {}
+    if start_date or end_date:
+        date_filter = {}
+        if start_date:
+            date_filter["$gte"] = datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(tzinfo=UTC)
+        if end_date:
+            date_filter["$lte"] = datetime.fromisoformat(end_date.replace('Z', '+00:00')).replace(tzinfo=UTC)
+        match_stage["created_at"] = date_filter
+    
+    # Aggregate summary statistics
     pipeline = [
-        {"$unwind": "$items"},
+        {"$match": match_stage},
         {"$group": {
-            "_id": "$items.product_id",
-            "product_name": {"$first": "$items.product_name"},
-            "total_quantity": {"$sum": "$items.quantity"},
-            "total_revenue": {"$sum": "$items.total"}
+            "_id": None,
+            "total_orders": {"$sum": 1},
+            "total_revenue": {"$sum": "$total_amount"},
+            "avg_order_value": {"$avg": "$total_amount"},
+            "total_items_sold": {"$sum": {"$sum": "$items.quantity"}},
+            "status_breakdown": {
+                "$push": "$status"
+            },
+            "min_order_value": {"$min": "$total_amount"},
+            "max_order_value": {"$max": "$total_amount"}
         }}
     ]
     
-    analytics = []
-    async for result in orders_collection.aggregate(pipeline):
-        analytics.append({
-            "product_id": result["_id"],
-            "product_name": result["product_name"],
-            "total_quantity": result["total_quantity"],
-            "total_revenue": result["total_revenue"]
-        })
+    result = None
+    async for doc in orders_collection.aggregate(pipeline):
+        result = doc
+        break
     
-    return analytics
+    if not result:
+        return {
+            "total_orders": 0,
+            "total_revenue": 0,
+            "avg_order_value": 0,
+            "total_items_sold": 0,
+            "min_order_value": 0,
+            "max_order_value": 0,
+            "status_counts": {}
+        }
+    
+    # Count status breakdown
+    status_counts = {}
+    for status in result.get("status_breakdown", []):
+        status_counts[status] = status_counts.get(status, 0) + 1
+    
+    return {
+        "total_orders": result.get("total_orders", 0),
+        "total_revenue": result.get("total_revenue", 0),
+        "avg_order_value": result.get("avg_order_value", 0),
+        "total_items_sold": result.get("total_items_sold", 0),
+        "min_order_value": result.get("min_order_value", 0),
+        "max_order_value": result.get("max_order_value", 0),
+        "status_counts": status_counts
+    }
 
 # Content endpoints
 @app.get("/api/content/{page}")
