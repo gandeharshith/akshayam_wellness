@@ -5,12 +5,11 @@ motor==3.3.2
 pydantic==2.5.0
 python-multipart==0.0.6
 python-jose==3.3.0
-cryptography==41.0.7
+cryptography>=45.0.6
 passlib==1.7.4
 bcrypt==4.1.2
 python-dotenv==1.0.0
 Pillow==10.1.0
 aiofiles==23.2.1
-aiosmtplib==3.0.1
 sendgrid==6.12.5
 email-validator==2.1.0
