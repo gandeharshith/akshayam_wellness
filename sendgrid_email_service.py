@@ -1,159 +1,141 @@
-import smtplib
-import ssl
-import aiosmtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 import os
+import logging
 from typing import List, Optional
 from datetime import datetime, UTC
-import asyncio
-import logging
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail, Email, To, Content
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
-class EmailService:
+class SendGridEmailService:
     def __init__(self):
-        # Email configuration from environment variables
-        self.smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        self.sender_email = os.getenv("SENDER_EMAIL")
-        self.sender_password = os.getenv("SENDER_PASSWORD")
-        self.admin_email = os.getenv("ADMIN_EMAIL", "akshayamwellness@gmail.com")
+        # Initialize as None - will be loaded when needed
+        self._api_key = None
+        self._sg = None
+        self._initialized = False
+    
+    def _initialize_if_needed(self):
+        """Lazy initialization of SendGrid client"""
+        if self._initialized:
+            return
+            
+        # SendGrid configuration from environment variables
+        self._api_key = os.getenv("SENDGRID_API_KEY") or os.getenv("SENDER_PASSWORD", "")
+        self._sender_email = os.getenv("SENDER_EMAIL", "akshayamwellnessorders@gmail.com")
+        self._admin_email = os.getenv("ADMIN_EMAIL", "akshayamwellness@gmail.com")
+        self._admin_email_2 = os.getenv("ADMIN_EMAIL_2", "vivek1995@gmail.com")
         
-        # Validate configuration
-        if not self.sender_email or not self.sender_password:
-            logger.warning("Email service not configured properly. Missing SENDER_EMAIL or SENDER_PASSWORD.")
+        print(f"🔧 SendGrid API Key loaded: {self._api_key[:15]}...{self._api_key[-5:] if len(self._api_key) > 20 else 'Invalid'}")
+        print(f"🔧 API Key starts with SG.: {self._api_key.startswith('SG.') if self._api_key else False}")
+        
+        # Initialize SendGrid client
+        if self._api_key and self._api_key.startswith("SG."):
+            self._sg = SendGridAPIClient(api_key=self._api_key)
+            print("✅ SendGrid Web API client initialized successfully")
+            logger.info("SendGrid Web API client initialized successfully")
+        else:
+            self._sg = None
+            print(f"❌ SendGrid API key invalid: {self._api_key[:30] if self._api_key else 'None'}")
+            logger.error("SendGrid API key not configured properly or invalid format")
+            
+        self._initialized = True
+    
+    @property
+    def api_key(self):
+        self._initialize_if_needed()
+        return self._api_key
+        
+    @property
+    def sg(self):
+        self._initialize_if_needed()
+        return self._sg
+    
+    @property
+    def admin_email(self):
+        self._initialize_if_needed()
+        return self._admin_email
+    
+    @property
+    def admin_email_2(self):
+        self._initialize_if_needed()
+        return self._admin_email_2
+        
+    @property  
+    def sender_email(self):
+        self._initialize_if_needed()
+        return self._sender_email
     
     async def send_email(self, 
                         to_emails: List[str], 
                         subject: str, 
                         body_text: str, 
-                        body_html: Optional[str] = None,
-                        cc_emails: Optional[List[str]] = None,
-                        bcc_emails: Optional[List[str]] = None) -> bool:
+                        body_html: Optional[str] = None) -> bool:
         """
-        Send an email asynchronously with enhanced Gmail SMTP connection handling
+        Send an email using SendGrid Web API
         
         Args:
             to_emails: List of recipient email addresses
             subject: Email subject line
             body_text: Plain text body
             body_html: HTML body (optional)
-            cc_emails: List of CC recipients (optional)
-            bcc_emails: List of BCC recipients (optional)
             
         Returns:
             bool: True if email sent successfully, False otherwise
         """
         try:
-            if not self.sender_email or not self.sender_password:
-                logger.error("Email service not configured properly - Missing credentials")
+            if not self.sg:
+                print("❌ SendGrid API client not initialized - check API key")
+                logger.error("SendGrid API client not initialized")
                 return False
             
-            print(f"📧 ENHANCED GMAIL SMTP - Attempting email to {to_emails}")
-            print(f"🔧 Using {self.smtp_server}:{self.smtp_port}")
+            print(f"📧 SENDGRID WEB API - Sending email to {to_emails}")
+            print(f"🔧 Using SendGrid Web API v3")
+            print(f"🔑 API Key: {self.api_key[:15]}...{self.api_key[-5:] if len(self.api_key) > 20 else 'Invalid'}")
             
-            # Create message
-            message = MIMEMultipart("alternative")
-            message["Subject"] = subject
-            message["From"] = self.sender_email
-            message["To"] = ", ".join(to_emails)
+            # Create the email
+            from_email = Email(self.sender_email)
+            to_list = [To(email) for email in to_emails]
             
-            if cc_emails:
-                message["Cc"] = ", ".join(cc_emails)
-            
-            # Create the plain-text part
-            text_part = MIMEText(body_text, "plain")
-            message.attach(text_part)
-            
-            # Create the HTML part if provided
+            # Create Mail object
             if body_html:
-                html_part = MIMEText(body_html, "html")
-                message.attach(html_part)
+                # Use HTML content if provided
+                content = Content("text/html", body_html)
+            else:
+                # Use plain text content
+                content = Content("text/plain", body_text)
             
-            # Prepare recipient list
-            recipients = to_emails.copy()
-            if cc_emails:
-                recipients.extend(cc_emails)
-            if bcc_emails:
-                recipients.extend(bcc_emails)
+            mail = Mail(from_email, to_list[0], subject, content)
             
-            # Enhanced Gmail SMTP configuration with retry mechanism
-            max_retries = 3
-            retry_delay = 2  # seconds
+            # Add additional recipients if any
+            if len(to_list) > 1:
+                for to_email in to_list[1:]:
+                    mail.add_to(to_email)
             
-            for attempt in range(max_retries):
-                try:
-                    print(f"🔄 Attempt {attempt + 1}/{max_retries} - Connecting to Gmail SMTP...")
-                    
-                    # Determine connection settings based on port
-                    if self.smtp_port == 465:
-                        # Port 465: Use direct TLS/SSL connection
-                        print("🔒 Using SSL/TLS on port 465")
-                        await aiosmtplib.send(
-                            message,
-                            hostname=self.smtp_server,
-                            port=self.smtp_port,
-                            use_tls=True,  # Direct TLS for port 465
-                            start_tls=False,  # Don't use STARTTLS for port 465
-                            username=self.sender_email,
-                            password=self.sender_password,
-                            recipients=recipients,
-                            timeout=60,  # Increased timeout for production
-                            validate_certs=True,
-                        )
-                    else:
-                        # Port 587: Use STARTTLS
-                        print("🔐 Using STARTTLS on port 587")
-                        await aiosmtplib.send(
-                            message,
-                            hostname=self.smtp_server,
-                            port=self.smtp_port,
-                            use_tls=False,  # No direct TLS for port 587
-                            start_tls=True,  # Use STARTTLS for port 587
-                            username=self.sender_email,
-                            password=self.sender_password,
-                            recipients=recipients,
-                            timeout=60,  # Increased timeout for production
-                            validate_certs=True,
-                        )
-                    
-                    print(f"✅ Email sent successfully on attempt {attempt + 1}")
-                    logger.info(f"Email sent successfully to {to_emails} on attempt {attempt + 1}")
-                    return True
-                    
-                except (aiosmtplib.SMTPConnectTimeoutError, 
-                        aiosmtplib.SMTPServerDisconnected,
-                        ConnectionError,
-                        OSError) as conn_e:
-                    print(f"⚠️ Connection attempt {attempt + 1} failed: {type(conn_e).__name__}: {str(conn_e)}")
-                    if attempt < max_retries - 1:
-                        print(f"⏳ Retrying in {retry_delay} seconds...")
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2  # Exponential backoff
-                    else:
-                        print(f"❌ All {max_retries} connection attempts failed")
-                        logger.error(f"SMTP Connection failed after {max_retries} attempts: {str(conn_e)}")
-                        return False
-                        
-                except aiosmtplib.SMTPException as smtp_e:
-                    print(f"❌ SMTP Error on attempt {attempt + 1}: {type(smtp_e).__name__}: {str(smtp_e)}")
-                    logger.error(f"SMTP Error: {type(smtp_e).__name__}: {str(smtp_e)}")
-                    return False
-                    
-                except Exception as send_e:
-                    print(f"❌ Send Error on attempt {attempt + 1}: {type(send_e).__name__}: {str(send_e)}")
-                    logger.error(f"Send Error: {type(send_e).__name__}: {str(send_e)}")
-                    return False
+            # Add plain text version if HTML is provided
+            if body_html and body_text:
+                mail.add_content(Content("text/plain", body_text))
             
-            return False  # Should not reach here
+            # Send the email
+            print("🚀 Sending email via SendGrid Web API...")
+            response = self.sg.send(mail)
             
+            # Check response status
+            if response.status_code in [200, 201, 202]:
+                print(f"✅ SendGrid API Success! Status Code: {response.status_code}")
+                print(f"📬 Message ID: {response.headers.get('X-Message-Id', 'N/A')}")
+                logger.info(f"Email sent successfully via SendGrid Web API to {to_emails}")
+                return True
+            else:
+                print(f"❌ SendGrid API Error! Status Code: {response.status_code}")
+                print(f"🔍 Response Body: {response.body}")
+                print(f"🔍 Response Headers: {response.headers}")
+                logger.error(f"SendGrid API error: Status {response.status_code}, Body: {response.body}")
+                return False
+                
         except Exception as e:
-            print(f"💥 General email error: {type(e).__name__}: {str(e)}")
-            logger.error(f"General email error: {type(e).__name__}: {str(e)}")
+            print(f"💥 SendGrid Web API Exception: {type(e).__name__}: {str(e)}")
+            logger.error(f"SendGrid Web API error: {type(e).__name__}: {str(e)}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
             return False
@@ -306,7 +288,7 @@ Akshayam Wellness System
     
     async def send_order_notification(self, order_data: dict) -> bool:
         """
-        Send order notification email to admin
+        Send order notification email to admin using SendGrid Web API
         
         Args:
             order_data: Order dictionary containing order information
@@ -324,34 +306,38 @@ Akshayam Wellness System
             subject = f"🛒 New Order #{order_id} from {user_name} - Akshayam Wellness"
             
             # CRITICAL DEBUGGING: Log all email configuration
-            print(f"🔍 EMAIL DEBUG - Order {order_id}")
-            print(f"📧 Admin Email: {self.admin_email}")
+            print(f"🔍 SENDGRID EMAIL DEBUG - Order {order_id}")
+            print(f"📧 Admin Email 1: {self.admin_email}")
+            print(f"📧 Admin Email 2: {self.admin_email_2}")
             print(f"📧 Sender Email: {self.sender_email}")
-            print(f"🌐 SMTP Server: {self.smtp_server}:{self.smtp_port}")
-            print(f"🔑 Has Password: {'Yes' if self.sender_password else 'No'}")
+            print(f"🌐 SendGrid Web API v3")
+            print(f"🔑 API Key Present: {'Yes' if self.api_key and self.api_key.startswith('SG.') else 'No'}")
             print(f"📝 Subject: {subject}")
             
-            # Send email to admin
+            # Send email to both admin emails
+            admin_emails = [self.admin_email, self.admin_email_2]
+            print(f"📧 Sending to both admins: {admin_emails}")
+            
             success = await self.send_email(
-                to_emails=[self.admin_email],
+                to_emails=admin_emails,
                 subject=subject,
                 body_text=text_body,
                 body_html=html_body
             )
             
             if success:
-                print(f"📬 EMAIL SERVICE REPORTS SUCCESS for order {order_id}")
-                logger.info(f"Order notification sent successfully for order {order_id}")
+                print(f"📬 SENDGRID WEB API REPORTS SUCCESS for order {order_id}")
+                logger.info(f"Order notification sent successfully via SendGrid Web API for order {order_id}")
             else:
-                print(f"📭 EMAIL SERVICE REPORTS FAILURE for order {order_id}")
-                logger.error(f"Failed to send order notification for order {order_id}")
+                print(f"📭 SENDGRID WEB API REPORTS FAILURE for order {order_id}")
+                logger.error(f"Failed to send order notification via SendGrid Web API for order {order_id}")
             
             return success
             
         except Exception as e:
             print(f"💥 EXCEPTION in send_order_notification for order {order_id}: {str(e)}")
-            logger.error(f"Error sending order notification: {str(e)}")
+            logger.error(f"Error sending order notification via SendGrid Web API: {str(e)}")
             return False
 
-# Create global email service instance
-email_service = EmailService()
+# Create global SendGrid email service instance
+sendgrid_email_service = SendGridEmailService()

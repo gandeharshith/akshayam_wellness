@@ -47,7 +47,7 @@ from auth import (
     get_password_hash, verify_password, create_access_token,
     get_current_admin, ACCESS_TOKEN_EXPIRE_MINUTES, ADMIN_TOKEN_EXPIRE_HOURS
 )
-from email_service import email_service
+from sendgrid_email_service import sendgrid_email_service
 
 # Create FastAPI app
 app = FastAPI(title="Akshayam Wellness API", version="1.0.0")
@@ -190,7 +190,7 @@ async def send_order_email_background(order_doc: dict):
         
         for attempt in range(max_retries):
             try:
-                email_success = await email_service.send_order_notification(order_doc)
+                email_success = await sendgrid_email_service.send_order_notification(order_doc)
                 if email_success:
                     print(f"✅ Background: Email notification sent successfully for order {order_doc['_id']} (attempt {attempt + 1})")
                     return
