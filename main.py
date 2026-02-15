@@ -95,9 +95,7 @@ async def startup_event():
     
     # Initialize order field for existing categories that don't have it
     categories_collection = db[CATEGORIES_COLLECTION]
-    categories_without_order = []
-    async for category in categories_collection.find({"order": {"$exists": False}}):
-        categories_without_order.append(category)
+    categories_without_order = await categories_collection.find({"order": {"$exists": False}}).to_list(length=None)
     
     if categories_without_order:
         for i, category in enumerate(categories_without_order, 1):
@@ -109,9 +107,7 @@ async def startup_event():
     
     # Initialize order field for existing products that don't have it
     products_collection = db[PRODUCTS_COLLECTION]
-    products_without_order = []
-    async for product in products_collection.find({"order": {"$exists": False}}):
-        products_without_order.append(product)
+    products_without_order = await products_collection.find({"order": {"$exists": False}}).to_list(length=None)
     
     if products_without_order:
         for i, product in enumerate(products_without_order, 1):

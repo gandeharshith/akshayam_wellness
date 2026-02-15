@@ -15,8 +15,8 @@ router = APIRouter()
 
 
 @router.get("/products")
-async def get_products(category_id: Optional[str] = None):
-    """Get all products, optionally filtered by category."""
+async def get_products(category_id: Optional[str] = None, search: Optional[str] = None):
+    """Get all products, optionally filtered by category and search term."""
     db = await get_database()
     products_collection = db[PRODUCTS_COLLECTION]
     
@@ -24,10 +24,42 @@ async def get_products(category_id: Optional[str] = None):
     if category_id:
         query["category_id"] = category_id
     
+    # Add search functionality
+    if search:
+        search_pattern = {"$regex": search, "$options": "i"}  # Case-insensitive search
+        query["$or"] = [
+            {"name": search_pattern},
+            {"description": search_pattern}
+        ]
+    
     products = []
     async for product in products_collection.find(query).sort("order", 1):
         products.append(serialize_doc(product))
     return products
+
+
+@router.get("/products/featured")
+async def get_featured_products():
+    """Get featured products (newly launched and this week's fresh)."""
+    try:
+        db = await get_database()
+        products_collection = db[PRODUCTS_COLLECTION]
+        
+        # Query for featured products - handle cases where field might not exist
+        newly_launched = await products_collection.find_one({"newly_launched": True})
+        this_weeks_fresh = await products_collection.find_one({"this_weeks_fresh": True})
+        
+        return {
+            "newly_launched": serialize_doc(newly_launched) if newly_launched else None,
+            "this_weeks_fresh": serialize_doc(this_weeks_fresh) if this_weeks_fresh else None
+        }
+    except Exception as e:
+        print(f"Error fetching featured products: {e}")
+        # Return empty response instead of failing
+        return {
+            "newly_launched": None,
+            "this_weeks_fresh": None
+        }
 
 
 @router.get("/products/{product_id}")
@@ -103,6 +135,74 @@ async def update_product(product_id: str, product: ProductUpdate):
             {"_id": ObjectId(product_id)}, 
             {"$set": update_data}
         )
+    
+    updated_product = await products_collection.find_one({"_id": ObjectId(product_id)})
+    return serialize_doc(updated_product)
+
+
+@router.patch("/admin/products/{product_id}/best-seller", dependencies=[Depends(get_current_admin)])
+async def toggle_best_seller(product_id: str, best_seller: bool):
+    """Toggle best seller status for a product."""
+    db = await get_database()
+    products_collection = db[PRODUCTS_COLLECTION]
+    
+    result = await products_collection.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"best_seller": best_seller}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    updated_product = await products_collection.find_one({"_id": ObjectId(product_id)})
+    return serialize_doc(updated_product)
+
+
+@router.patch("/admin/products/{product_id}/newly-launched", dependencies=[Depends(get_current_admin)])
+async def toggle_newly_launched(product_id: str, newly_launched: bool):
+    """Toggle newly launched status for a product."""
+    db = await get_database()
+    products_collection = db[PRODUCTS_COLLECTION]
+    
+    # If setting to true, unset any other product's newly_launched status
+    if newly_launched:
+        await products_collection.update_many(
+            {"newly_launched": True},
+            {"$set": {"newly_launched": False}}
+        )
+    
+    result = await products_collection.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"newly_launched": newly_launched}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    updated_product = await products_collection.find_one({"_id": ObjectId(product_id)})
+    return serialize_doc(updated_product)
+
+
+@router.patch("/admin/products/{product_id}/this-weeks-fresh", dependencies=[Depends(get_current_admin)])
+async def toggle_this_weeks_fresh(product_id: str, this_weeks_fresh: bool):
+    """Toggle this week's fresh status for a product."""
+    db = await get_database()
+    products_collection = db[PRODUCTS_COLLECTION]
+    
+    # If setting to true, unset any other product's this_weeks_fresh status
+    if this_weeks_fresh:
+        await products_collection.update_many(
+            {"this_weeks_fresh": True},
+            {"$set": {"this_weeks_fresh": False}}
+        )
+    
+    result = await products_collection.update_one(
+        {"_id": ObjectId(product_id)},
+        {"$set": {"this_weeks_fresh": this_weeks_fresh}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Product not found")
     
     updated_product = await products_collection.find_one({"_id": ObjectId(product_id)})
     return serialize_doc(updated_product)

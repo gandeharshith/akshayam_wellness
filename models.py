@@ -61,6 +61,9 @@ class Product(BaseModel):
     price: float
     quantity: int
     image_url: Optional[str] = None
+    best_seller: bool = False  # Best seller tag
+    newly_launched: bool = False  # Featured as newly launched
+    this_weeks_fresh: bool = False  # Featured as this week's fresh
     order: int = 0  # For ordering products
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -164,6 +167,7 @@ class ProductCreate(BaseModel):
     category_id: str
     price: float
     quantity: int
+    best_seller: Optional[bool] = False
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
@@ -171,6 +175,9 @@ class ProductUpdate(BaseModel):
     category_id: Optional[str] = None
     price: Optional[float] = None
     quantity: Optional[int] = None
+    best_seller: Optional[bool] = None
+    newly_launched: Optional[bool] = None
+    this_weeks_fresh: Optional[bool] = None
 
 class UserCreate(BaseModel):
     name: str
