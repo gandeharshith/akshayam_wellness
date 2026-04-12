@@ -41,15 +41,16 @@ from routers.settings import router as settings_router
 app = FastAPI(title="Akshayam Wellness API", version="1.0.0")
 
 # CORS middleware
+# NOTE: Do NOT mix "*" with specific origins when allow_credentials=True.
+# Browsers reject responses where Access-Control-Allow-Origin: * is combined
+# with Access-Control-Allow-Credentials: true. Also, Railway's CDN (Fastly)
+# can cache a "*" response and serve it to credentialed requests, causing
+# failures on some networks (especially WiFi). Use allow_origins=["*"] only
+# OR use specific origins with credentials — never both.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # Local development
-        "https://akshayam-frontend.vercel.app",  # New Vercel deployment
-        "https://akshayam-frontend-fvqbhywgn-harshiths-projects-5e70bbde.vercel.app",  # Old Vercel deployment
-        "*"  # Allow all origins for now (you can restrict this later)
-    ],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],
     allow_headers=["*"],
 )
