@@ -40,7 +40,11 @@ async def get_image(file_id: str):
         return StreamingResponse(
             generate_stream(),
             media_type=content_type,
-            headers={"Content-Disposition": "inline"}
+            headers={
+                "Content-Disposition": "inline",
+                "Cache-Control": "public, max-age=604800, immutable",
+                "ETag": file_id,
+            }
         )
         
     except Exception as e:
