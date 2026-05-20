@@ -6,7 +6,6 @@ from datetime import datetime, UTC
 from typing import Dict, Any
 
 from database import get_database, ORDERS_COLLECTION
-from sendgrid_email_service import sendgrid_email_service
 from bson import ObjectId
 
 
@@ -15,13 +14,16 @@ async def send_order_email_background(order_doc: Dict[str, Any]):
     try:
         print(f"🚀 Background: Attempting to send email notification for order {order_doc['_id']}")
         
+        # Import here to avoid circular imports
+        from smtp_email_service import smtp_email_service
+        
         # Add retry logic for email sending
         max_retries = 3
         retry_delay = 2  # seconds
         
         for attempt in range(max_retries):
             try:
-                email_success = await sendgrid_email_service.send_order_notification(order_doc)
+                email_success = await smtp_email_service.send_order_notification(order_doc)
                 if email_success:
                     print(f"✅ Background: Email notification sent successfully for order {order_doc['_id']} (attempt {attempt + 1})")
                     return
@@ -36,8 +38,7 @@ async def send_order_email_background(order_doc: Dict[str, Any]):
         # If all retries failed, log the final failure
         print(f"❌ Background: All email attempts failed for order {order_doc['_id']} after {max_retries} retries")
         
-        # Optionally, you could update the order document in the database to flag email failure
-        # This would allow admins to see which orders didn't get email notifications
+        # Update the order document in the database to flag email failure
         try:
             db = await get_database()
             orders_collection = db[ORDERS_COLLECTION]
