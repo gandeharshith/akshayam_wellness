@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, UTC
 import os
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -36,6 +37,7 @@ from routers.recipes import router as recipes_router
 from routers.files import router as files_router
 from routers.contact import router as contact_router
 from routers.settings import router as settings_router
+from routers.subscriptions import router as subscriptions_router, subscription_scheduler
 
 # Create FastAPI app
 app = FastAPI(title="Akshayam Wellness API", version="1.0.0")
@@ -65,6 +67,7 @@ app.include_router(recipes_router, prefix="/api", tags=["Recipes"])
 app.include_router(files_router, prefix="/api", tags=["Files"])
 app.include_router(contact_router, prefix="/api", tags=["Contact"])
 app.include_router(settings_router, prefix="/api", tags=["Settings"])
+app.include_router(subscriptions_router, prefix="/api", tags=["Subscriptions"])
 
 
 # Database startup and shutdown events
@@ -164,6 +167,10 @@ async def startup_event():
             "updated_at": datetime.now(UTC)
         }
         await settings_collection.insert_one(min_order_data)
+
+    # Start subscription scheduler as background task
+    asyncio.create_task(subscription_scheduler())
+    print("[Subscriptions] Weekly scheduler started")
 
 
 @app.on_event("shutdown")
