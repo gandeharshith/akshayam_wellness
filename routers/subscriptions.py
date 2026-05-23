@@ -16,7 +16,7 @@ The background scheduler fires on the day/time configured in .env:
 To change the schedule, edit ONLY those three lines in .env and restart the server.
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, UTC, timedelta, timezone
@@ -28,7 +28,7 @@ import os
 from utils.helpers import serialize_doc as _serialize_doc
 
 from database import get_database, SUBSCRIPTIONS_COLLECTION, ORDERS_COLLECTION, USERS_COLLECTION, PRODUCTS_COLLECTION
-from auth import verify_password
+from auth import verify_password, get_current_admin
 
 router = APIRouter()
 
@@ -232,7 +232,7 @@ async def cancel_subscription(subscription_id: str, credentials: SubscriptionLog
 # Admin endpoints
 # ─────────────────────────────────────────────
 
-@router.get("/admin/subscriptions")
+@router.get("/admin/subscriptions", dependencies=[Depends(get_current_admin)])
 async def admin_get_all_subscriptions():
     """Admin: list all subscriptions."""
     db = await get_database()
@@ -241,7 +241,7 @@ async def admin_get_all_subscriptions():
     return [_serialize(s) for s in subs]
 
 
-@router.post("/admin/subscriptions/process")
+@router.post("/admin/subscriptions/process", dependencies=[Depends(get_current_admin)])
 async def admin_trigger_processing(background_tasks: BackgroundTasks):
     """Admin: manually trigger subscription processing (for testing)."""
     background_tasks.add_task(process_due_subscriptions)
@@ -286,6 +286,22 @@ async def process_due_subscriptions():
                 continue
 
             # Build order document
+            # Deduct stock for each subscription item (skip if out of stock)
+            stock_ok = True
+            for item in sub["items"]:
+                try:
+                    product = await db[PRODUCTS_COLLECTION].find_one({"_id": ObjectId(item["product_id"])})
+                    if not product or product.get("quantity", 0) < item["quantity"]:
+                        print(f"[Subscriptions] Skipping sub {sub['_id']} — insufficient stock for {item['product_name']}")
+                        stock_ok = False
+                        break
+                except Exception:
+                    stock_ok = False
+                    break
+
+            if not stock_ok:
+                continue
+
             order_doc = {
                 "user_id": sub["user_id"],
                 "user_name": sub["user_name"],
@@ -301,6 +317,13 @@ async def process_due_subscriptions():
                 "updated_at": now,
             }
             await db[ORDERS_COLLECTION].insert_one(order_doc)
+
+            # Decrement product quantities
+            for item in sub["items"]:
+                await db[PRODUCTS_COLLECTION].update_one(
+                    {"_id": ObjectId(item["product_id"])},
+                    {"$inc": {"quantity": -item["quantity"]}}
+                )
 
             # Mark subscription as processed for this week
             await db[SUBSCRIPTIONS_COLLECTION].update_one(

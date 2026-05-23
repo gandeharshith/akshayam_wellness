@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 from passlib.context import CryptContext
@@ -5,8 +6,8 @@ from jose import JWTError, jwt
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# Security settings
-SECRET_KEY = "akshayam-wellness-secret-key-2023"  # In production, use environment variable
+# Security settings — loaded from environment variable (never hardcoded)
+SECRET_KEY = os.getenv("SECRET_KEY", "akshayam-wellness-secret-key-2023")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30  # Regular token expiry
 ADMIN_TOKEN_EXPIRE_HOURS = 10     # Admin token expiry - 10 hours

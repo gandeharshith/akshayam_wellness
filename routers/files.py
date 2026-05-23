@@ -23,11 +23,14 @@ async def get_image(file_id: str):
         
         # Download entire file to BytesIO to avoid streaming Unicode issues
         file_bytes = io.BytesIO()
+        # Open stream first to read metadata (content_type)
+        grid_out = await fs.open_download_stream(ObjectId(file_id))
+        content_type = "image/jpeg"  # default fallback
+        if grid_out.metadata and grid_out.metadata.get("content_type"):
+            content_type = grid_out.metadata["content_type"]
+        # Now download the actual bytes
         await fs.download_to_stream(ObjectId(file_id), file_bytes)
         file_bytes.seek(0)
-        
-        # Use default content type
-        content_type = "image/jpeg"
         
         # Stream from BytesIO
         def generate_stream():
