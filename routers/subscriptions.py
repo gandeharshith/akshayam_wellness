@@ -5,25 +5,24 @@ A subscription stores:
   - user credentials (email + password) for authentication
   - product to order, quantity
   - delivery address
-  - day_of_week (stored for reference, but orders are always placed on the configured day)
+  - day_of_week: the day the user chose (0=Mon … 6=Sun)
   - active flag
 
-The background scheduler fires on the day/time configured in .env:
-  SUBSCRIPTION_ORDER_DAY    — 0=Mon … 6=Sun  (default 3 = Thursday)
-  SUBSCRIPTION_ORDER_HOUR   — 24-hour IST    (default 9)
-  SUBSCRIPTION_ORDER_MINUTE — minute IST     (default 40)
+The background scheduler checks every minute. On each user's selected
+day_of_week at 18:00 IST (6:00 PM), it creates a single order for that
+subscription for the current week (idempotent via last_processed_week).
 
-To change the schedule, edit ONLY those three lines in .env and restart the server.
+No environment variables are needed for scheduling — each subscription
+uses its own day_of_week field chosen by the user.
 """
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime, UTC, timedelta, timezone
+from datetime import datetime, UTC, timedelta
 from zoneinfo import ZoneInfo
 from bson import ObjectId
 import asyncio
-import os
 
 from utils.helpers import serialize_doc as _serialize_doc
 
@@ -254,30 +253,35 @@ async def admin_trigger_processing(background_tasks: BackgroundTasks):
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# ── Schedule config — edit ONLY in .env ─────────────────────────────────────
-# SUBSCRIPTION_ORDER_DAY    : 0=Mon … 6=Sun  (default 3 = Thursday)
-# SUBSCRIPTION_ORDER_HOUR   : 24-hour IST    (default 9)
-# SUBSCRIPTION_ORDER_MINUTE : minute IST     (default 40)
-ORDER_DAY_IST    = int(os.getenv("SUBSCRIPTION_ORDER_DAY",    "3"))
-ORDER_HOUR_IST   = int(os.getenv("SUBSCRIPTION_ORDER_HOUR",   "9"))
-ORDER_MINUTE_IST = int(os.getenv("SUBSCRIPTION_ORDER_MINUTE", "40"))
-# ─────────────────────────────────────────────────────────────────────────────
+# Fixed order time: 18:00 IST (6:00 PM) — no env variables needed.
+# Each subscription fires on its own day_of_week at this time.
+ORDER_HOUR_IST = 18
+ORDER_MINUTE_IST = 0
 
 
 async def process_due_subscriptions():
     """
-    Called by the background scheduler on the configured day/time (IST).
-    Places orders for ALL active subscriptions that haven't been
-    processed this ISO week yet.
+    Called by the background scheduler every minute.
+    Checks if the current IST time is 18:00 (6 PM) and if today's weekday
+    matches any active subscription's day_of_week. If so, places an order
+    for that subscription (once per week, idempotent via last_processed_week).
     """
     try:
         db = await get_database()
-        now = datetime.now(UTC)
-        iso_week = now.strftime("%Y-W%W")  # e.g. "2024-W21"
+        now_utc = datetime.now(UTC)
+        now_ist = datetime.now(IST)
+        today_weekday = now_ist.weekday()  # 0=Mon … 6=Sun
+        iso_week = now_ist.strftime("%Y-W%W")  # e.g. "2024-W21"
 
-        # Fetch all active subscriptions (no day_of_week filter — all run on Thursday)
-        cursor = db[SUBSCRIPTIONS_COLLECTION].find({"active": True})
+        # Only process subscriptions whose day_of_week matches today
+        cursor = db[SUBSCRIPTIONS_COLLECTION].find({
+            "active": True,
+            "day_of_week": today_weekday,
+        })
         subs = await cursor.to_list(length=None)
+
+        if not subs:
+            return
 
         placed = 0
         for sub in subs:
@@ -285,8 +289,7 @@ async def process_due_subscriptions():
             if sub.get("last_processed_week") == iso_week:
                 continue
 
-            # Build order document
-            # Deduct stock for each subscription item (skip if out of stock)
+            # Check stock for each subscription item
             stock_ok = True
             for item in sub["items"]:
                 try:
@@ -302,6 +305,7 @@ async def process_due_subscriptions():
             if not stock_ok:
                 continue
 
+            # Build and insert order document
             order_doc = {
                 "user_id": sub["user_id"],
                 "user_name": sub["user_name"],
@@ -313,8 +317,9 @@ async def process_due_subscriptions():
                 "status": "pending",
                 "source": "subscription",
                 "subscription_id": str(sub["_id"]),
-                "created_at": now,
-                "updated_at": now,
+                "notes": sub.get("notes", ""),
+                "created_at": now_utc,
+                "updated_at": now_utc,
             }
             await db[ORDERS_COLLECTION].insert_one(order_doc)
 
@@ -330,60 +335,61 @@ async def process_due_subscriptions():
                 {"_id": sub["_id"]},
                 {"$set": {
                     "last_processed_week": iso_week,
-                    "last_order_placed_at": now,
-                    "updated_at": now,
+                    "last_order_placed_at": now_utc,
+                    "updated_at": now_utc,
                 }}
             )
             placed += 1
-            print(f"[Subscriptions] Placed order for {sub['user_email']} (sub {sub['_id']})")
+            print(f"[Subscriptions] Placed order for {sub['user_email']} (sub {sub['_id']}) — {DAY_NAMES[today_weekday]} 18:00 IST")
 
-        print(f"[Subscriptions] Processing done — {placed} order(s) placed for week {iso_week}")
+        if placed:
+            print(f"[Subscriptions] Processing done — {placed} order(s) placed for week {iso_week}")
     except Exception as e:
         print(f"[Subscriptions] Error during processing: {e}")
 
 
 async def subscription_scheduler():
     """
-    Runs forever in the background.
-    Fires every week on ORDER_DAY_IST at ORDER_HOUR_IST:ORDER_MINUTE_IST IST.
-    All three values are read from .env at startup — change them there.
+    Runs forever in the background. Every day at 18:00 IST (6:00 PM),
+    it processes all active subscriptions whose day_of_week matches today.
 
-    On startup: if today is the configured day AND we are already past the
-    scheduled time, runs once immediately (handles server restarts).
-    Then sleeps until the next occurrence of that day/time.
+    No environment variables are needed — each subscription uses its own
+    day_of_week field selected by the user at creation time.
+
+    Idempotency: each subscription has a `last_processed_week` field
+    (e.g. "2026-W21"). If it matches the current week, the subscription
+    is skipped — so redeployments/restarts never create duplicate orders.
+
+    On startup: if it's already past 18:00 IST today, runs once immediately
+    to catch up (but idempotency prevents duplicates).
     """
-    day_name = DAY_NAMES[ORDER_DAY_IST]
-    schedule_str = f"{day_name} at {ORDER_HOUR_IST:02d}:{ORDER_MINUTE_IST:02d} IST"
-    print(f"[Subscriptions] Scheduler started — will run every {schedule_str}")
+    print(f"[Subscriptions] Scheduler started — orders fire at 18:00 IST on each subscription's selected day")
 
     now_ist = datetime.now(IST)
+    scheduled_time_today = now_ist.replace(hour=ORDER_HOUR_IST, minute=ORDER_MINUTE_IST, second=0, microsecond=0)
 
-    # If today is the configured day and we're already past the scheduled time,
-    # run once immediately (handles server restarts after the scheduled time)
-    if now_ist.weekday() == ORDER_DAY_IST:
-        scheduled_today = now_ist.replace(
-            hour=ORDER_HOUR_IST, minute=ORDER_MINUTE_IST, second=0, microsecond=0
-        )
-        if now_ist >= scheduled_today:
-            print(f"[Subscriptions] Server started after scheduled time on {day_name} — running immediately")
-            await process_due_subscriptions()
+    # On startup: if we're already past 18:00 today, process immediately
+    # (handles server restarts/redeploys after the scheduled time).
+    # The idempotency check inside process_due_subscriptions() ensures
+    # no duplicate orders — if last_processed_week matches this week, it skips.
+    if now_ist >= scheduled_time_today:
+        print(f"[Subscriptions] Server started after 18:00 IST on {DAY_NAMES[now_ist.weekday()]} — checking for missed orders (idempotent)")
+        await process_due_subscriptions()
 
     while True:
         now_ist = datetime.now(IST)
 
-        # Find the next occurrence of ORDER_DAY_IST at ORDER_HOUR_IST:ORDER_MINUTE_IST
-        days_until_order_day = (ORDER_DAY_IST - now_ist.weekday()) % 7
-        next_order_day = now_ist + timedelta(days=days_until_order_day)
-        next_run = next_order_day.replace(
-            hour=ORDER_HOUR_IST, minute=ORDER_MINUTE_IST, second=0, microsecond=0
-        )
+        # Calculate seconds until next 18:00 IST
+        target_today = now_ist.replace(hour=ORDER_HOUR_IST, minute=ORDER_MINUTE_IST, second=0, microsecond=0)
 
-        # If that time is already past (or right now), push to next week
-        if next_run <= now_ist:
-            next_run += timedelta(weeks=1)
+        if now_ist >= target_today:
+            # Already past 18:00 today, wait until 18:00 tomorrow
+            target = target_today + timedelta(days=1)
+        else:
+            target = target_today
 
-        sleep_seconds = (next_run - now_ist).total_seconds()
-        print(f"[Subscriptions] Next run at {next_run.strftime('%Y-%m-%d %H:%M IST')} "
+        sleep_seconds = (target - now_ist).total_seconds()
+        print(f"[Subscriptions] Next check at {target.strftime('%Y-%m-%d %H:%M IST')} "
               f"(in {sleep_seconds/3600:.1f} hours)")
         await asyncio.sleep(sleep_seconds)
         await process_due_subscriptions()
